@@ -20,9 +20,12 @@ from .records import FeatureError, JsonStore, new_id
 
 RESEARCH_INDEX = "research/index.json"
 MAX_PROMPT_CHARS = 1000
-PLAN_TIMEOUT_SECONDS = 45.0
-START_TIMEOUT_SECONDS = 45.0
-POLL_TIMEOUT_SECONDS = 30.0  # one chat read; the function limit is 60 s
+# Gemini can take minutes to write a plan or confirm a start, so the request waits for
+# its reply. This must stay under the function limit in vercel.json (300 s), with room
+# for the client's connection step (up to 45 s) and saving the job.
+PLAN_TIMEOUT_SECONDS = 240.0
+START_TIMEOUT_SECONDS = 240.0
+POLL_TIMEOUT_SECONDS = 30.0  # one chat read
 STARTING_STALE_SECONDS = 120  # a "starting" job this old was interrupted and may be retried
 MAX_RUNNING_SECONDS = 90 * 60
 

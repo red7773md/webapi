@@ -1076,7 +1076,7 @@
         return;
       }
       setBusy(true);
-      setNotice("making a research plan with gemini... (up to a minute)", "dim");
+      setNotice("making a research plan with gemini. this can take a few minutes; keep this page open.", "dim");
       try {
         const job = await api("/api/research", {
           method: "POST",

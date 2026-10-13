@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from gemini_webapi import Citation, DeepResearchDocument, DeepResearchPlan, GeminiError
 
-from app import research_service
+from app import gemini_service, research_service
 from app.config import Settings
 from app.main import create_app
 
@@ -47,6 +47,7 @@ class Backend:
         self.plan_delay = 0.0
         self.start_error: Exception | None = None
         self.start_delay = 0.0
+        self.init_calls: list[dict] = []  # every connect, so tests can read the budget
 
 
 class FakeOutput:
@@ -65,7 +66,8 @@ class FakeClient:
     def __init__(self, backend: Backend) -> None:
         self._backend = backend
 
-    async def init(self, timeout=45.0, auto_refresh=True, **_):
+    async def init(self, timeout=45.0, auto_refresh=True, **kwargs):
+        self._backend.init_calls.append({"timeout": timeout, **kwargs})
         return None
 
     def list_models(self):
@@ -184,6 +186,18 @@ def test_plan_confirm_and_poll_until_the_report_arrives(env):
 
     listed = client.get("/api/research").json()["jobs"]
     assert [(j["id"], j["status"]) for j in listed] == [(job_id, "done")]
+
+
+def test_gemini_is_given_the_full_reply_budget_for_planning(env):
+    """The plan waits for Gemini's reply, so the client must not give up after 45 s."""
+    client, backend, _ = env
+    new_plan(client)
+    assert backend.init_calls, "the client connected at least once"
+    for connect in backend.init_calls:
+        assert connect["timeout"] == gemini_service.CLIENT_TIMEOUT_SECONDS
+        assert connect["watchdog_timeout"] == gemini_service.CLIENT_TIMEOUT_SECONDS
+    assert gemini_service.CLIENT_TIMEOUT_SECONDS >= research_service.PLAN_TIMEOUT_SECONDS
+    assert gemini_service.CLIENT_TIMEOUT_SECONDS >= research_service.START_TIMEOUT_SECONDS
 
 
 def test_a_started_research_cannot_be_started_again(env):

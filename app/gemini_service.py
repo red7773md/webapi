@@ -21,7 +21,11 @@ from .storage import StorageError
 
 log = logging.getLogger("gemini_webui")
 
-VERIFY_TIMEOUT_SECONDS = 45.0  # keep below the 60 s function limit set in vercel.json
+VERIFY_TIMEOUT_SECONDS = 45.0  # the connection handshake and the verify check
+# How long the library waits for Gemini to finish one reply. Deep research planning
+# and starting can take minutes, so this is far above the handshake limit. Each
+# feature caps its own wait (see research_service.py) below the function limit.
+CLIENT_TIMEOUT_SECONDS = 240.0
 ClientFactory = Callable[[str, str | None], Any]
 
 
@@ -67,6 +71,8 @@ def describe_failure(exc: Exception) -> str:
         return "Google rejected these cookies. Copy fresh values from a logged-in browser session."
     if isinstance(exc, GeminiTimeoutError):
         return "Timed out reaching gemini.google.com. Try again, or check the network."
+    if isinstance(exc, asyncio.TimeoutError):
+        return "Gemini did not connect in time. Try again in a moment."
     if isinstance(exc, GeminiError):
         return f"Gemini client error: {exc}"
     if "connection" in type(exc).__name__.lower():
@@ -159,7 +165,15 @@ class GeminiService:
             error: str | None = None
             models: list[dict[str, Any]] = []
             try:
-                await client.init(timeout=timeout, auto_refresh=True)
+                # Same reply budget as require_client, because this client is cached and reused.
+                await asyncio.wait_for(
+                    client.init(
+                        timeout=CLIENT_TIMEOUT_SECONDS,
+                        auto_refresh=True,
+                        watchdog_timeout=CLIENT_TIMEOUT_SECONDS,
+                    ),
+                    timeout,
+                )
                 models = _serialise_models(client)
                 if not models:
                     error = "Connected, but no models were returned. The cookie set may be incomplete."
@@ -192,7 +206,15 @@ class GeminiService:
             await self._drop_client()
             client = self._factory(rec.psid, rec.psidts)
             try:
-                await client.init(timeout=VERIFY_TIMEOUT_SECONDS, auto_refresh=True)
+                # The handshake gets 45 s. The client keeps the long reply budget.
+                await asyncio.wait_for(
+                    client.init(
+                        timeout=CLIENT_TIMEOUT_SECONDS,
+                        auto_refresh=True,
+                        watchdog_timeout=CLIENT_TIMEOUT_SECONDS,
+                    ),
+                    VERIFY_TIMEOUT_SECONDS,
+                )
             except Exception as exc:
                 await _close_quietly(client)
                 raise GeminiNotReady(describe_failure(exc)) from exc

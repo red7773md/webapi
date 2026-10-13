@@ -154,14 +154,17 @@ set -a; . ./.env; set +a
   after a few days, that is the first thing to check.
 - Chromium-based browsers issue device-bound cookies that can expire within hours.
   Firefox cookies last longer. This is in the README and the UI hint.
-- Deep research runs for 5–10 minutes, longer than the 60 s function limit. Step 4
-  handles it by saving the job after each step and polling with one short chat read
-  per request (the page polls every 6 s while the screen is open). Nothing waits
-  inside one request.
+- Deep research runs for 5–10 minutes. Planning and starting wait for Gemini's reply
+  inside the request, up to 240 s each, because Gemini needs time to write the plan.
+  That needs `maxDuration` 300 in vercel.json. If Vercel refuses the setting for this
+  plan, the build fails; then lower the caps in research_service.py. The run itself
+  is polled with short requests (one chat read each, page checks every 6 s).
 - A research job is marked failed after 90 minutes without a report. If the browser
   is closed, the job is still on the server; reopen the RESEARCH screen to see it.
-- A research start that times out (45 s) may still have started at Gemini. The job
+- A research start that times out (240 s) may still have started at Gemini. The job
   shows failed with that note; check the Gemini app before pressing RETRY START.
+- A plan that times out (240 s) is lost. The plan chat may exist in Gemini, but this
+  app does not know its ID, so retry from the topic.
 - Research reports come from the chat's latest deep research document. If the chat
   is changed in the Gemini app, the report can be missed.
 - Chat keeps no attachment files, only names and sizes. Gemini's own history is not
