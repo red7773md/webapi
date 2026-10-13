@@ -238,6 +238,7 @@
     const mod = MODULES.find((m) => m.key === key);
     if (key === "session") sessionView(view);
     else if (key === "chat") chatView(view);
+    else if (key === "image") imageView(view);
     else offlineView(view, mod);
   }
 
@@ -534,13 +535,7 @@
       drawList();
     };
 
-    const loadModels = async () => {
-      const st = await api("/api/session");
-      for (const m of st.models || []) {
-        if (m.available === false) continue;
-        modelSelect.append(el("option", { value: m.name, text: m.display_name || m.name }));
-      }
-    };
+    const loadModels = () => fillModelSelect(modelSelect);
 
     const openChat = async (id) => {
       setBusy(true);
@@ -662,6 +657,179 @@
     newChat();
     setBusy(true);
     Promise.all([loadList(), loadModels()])
+      .catch(fail)
+      .finally(() => setBusy(false));
+  }
+
+  // ----- IMAGE module --------------------------------------------------------
+
+  async function fillModelSelect(select) {
+    const st = await api("/api/session");
+    for (const m of st.models || []) {
+      if (m.available === false) continue;
+      select.append(el("option", { value: m.name, text: m.display_name || m.name }));
+    }
+  }
+
+  function imageView(view) {
+    const cache = new Map(); // image id -> object URL, released when the screen is left
+    const viewer = el("div", { class: "viewer" });
+    const grid = el("div", { class: "gallery", "aria-live": "polite" });
+    const notice = el("div", { class: "status", role: "status", "aria-live": "polite" });
+    const prompt = el("textarea", {
+      class: "field composer",
+      id: "image-prompt",
+      rows: 3,
+      maxlength: 1000,
+      placeholder: "Describe an image.  Ctrl+Enter to generate.",
+    });
+    const modelSelect = el(
+      "select",
+      { class: "field select", id: "image-model", "aria-label": "Model" },
+      el("option", { value: "", text: "default model" }),
+    );
+    const generateBtn = el("button", { class: "btn", type: "button", onclick: () => generate(), text: "[ GENERATE ]" });
+    const controls = [prompt, modelSelect, generateBtn];
+
+    const setBusy = (on) => controls.forEach((c) => (c.disabled = on));
+    const setNotice = (text, cls = "") => {
+      notice.className = `status ${cls}`.trim();
+      notice.textContent = text;
+    };
+    const fail = (err) => {
+      if (isAuthError(err)) {
+        renderLogin(undefined, "session expired. authenticate again.");
+        return;
+      }
+      setNotice(err.message, "bad");
+    };
+
+    const release = () => {
+      for (const url of cache.values()) URL.revokeObjectURL(url);
+      cache.clear();
+    };
+    window.addEventListener("hashchange", release, { once: true });
+
+    // Images are private, so they are fetched with the session cookie and shown as blob: URLs.
+    const urlFor = async (id) => {
+      if (!cache.has(id)) {
+        const res = await fetch(`/api/image/${id}`, { credentials: "same-origin" });
+        if (res.status === 401) throw new ApiError(401, "Login required.");
+        if (!res.ok) throw new ApiError(res.status, `could not load image (HTTP ${res.status}).`);
+        cache.set(id, URL.createObjectURL(await res.blob()));
+      }
+      return cache.get(id);
+    };
+
+    const showFull = async (img) => {
+      try {
+        const url = await urlFor(img.id);
+        viewer.replaceChildren(
+          el("img", { src: url, alt: img.prompt }),
+          el("p", { class: "hint", text: `prompt: ${img.prompt}` }),
+          el("div", { class: "actions" },
+            el("a", { class: "btn", href: url, download: `gemini-image-${img.id}.${img.mime.split("/")[1]}`, text: "[ DOWNLOAD ]" }),
+            el("button", { class: "btn", type: "button", onclick: () => viewer.replaceChildren(), text: "[ CLOSE ]" }),
+          ),
+        );
+        viewer.scrollIntoView({ block: "nearest" });
+      } catch (err) {
+        fail(err);
+      }
+    };
+
+    const remove = async (img) => {
+      if (!window.confirm("Delete this image from the archive?")) return;
+      try {
+        await api(`/api/image/${img.id}`, { method: "DELETE" });
+        cache.delete(img.id);
+        viewer.replaceChildren();
+        await loadGallery();
+        setNotice("image deleted.", "warn");
+      } catch (err) {
+        fail(err);
+      }
+    };
+
+    const card = (img) => {
+      const thumb = el("div", { class: "thumb dim", text: "loading..." });
+      urlFor(img.id)
+        .then((url) => thumb.replaceChildren(el("img", { src: url, alt: img.prompt, loading: "lazy" })))
+        .catch((err) => {
+          thumb.textContent = err.message;
+          if (isAuthError(err)) fail(err);
+        });
+      return el(
+        "figure",
+        { class: "gallery-card" },
+        thumb,
+        el("figcaption", { class: "hint", text: img.prompt }),
+        el(
+          "div",
+          { class: "actions" },
+          el("button", { class: "btn", type: "button", onclick: () => showFull(img), text: "[ VIEW ]" }),
+          el("button", { class: "btn danger", type: "button", onclick: () => remove(img), text: "[ DELETE ]" }),
+        ),
+      );
+    };
+
+    async function loadGallery() {
+      const res = await api("/api/image");
+      const images = res.images || [];
+      grid.replaceChildren(
+        ...(images.length ? images.map(card) : [el("p", { class: "dim", text: "no images yet." })]),
+      );
+    }
+
+    async function generate() {
+      const text = prompt.value.trim();
+      if (!text) {
+        setNotice("describe the image first.", "warn");
+        return;
+      }
+      setBusy(true);
+      setNotice("asking gemini for an image... (can take up to a minute)", "dim");
+      try {
+        const res = await api("/api/image/generate", {
+          method: "POST",
+          body: { prompt: text, model: modelSelect.value || null },
+        });
+        prompt.value = "";
+        setNotice(`${res.images.length} image(s) saved to the archive.`, "ok");
+        await loadGallery();
+      } catch (err) {
+        fail(err);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    prompt.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        generate();
+      }
+    });
+
+    view.replaceChildren(
+      panelTitle("image // gemini"),
+      el(
+        "p",
+        { class: "hint" },
+        'Gemini decides whether to make an image. Words like "draw" or "generate an image of" help. ',
+        "Images are kept in the archive and are visible only to you.",
+      ),
+      prompt,
+      el("div", { class: "composer-row" }, modelSelect, generateBtn),
+      notice,
+      viewer,
+      el("hr", { class: "dim" }),
+      panelTitle("archive"),
+      grid,
+    );
+
+    setBusy(true);
+    Promise.all([fillModelSelect(modelSelect), loadGallery()])
       .catch(fail)
       .finally(() => setBusy(false));
   }

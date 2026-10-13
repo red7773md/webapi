@@ -35,7 +35,7 @@ Risk accepted by Emdad: unofficial endpoints can break, and the account used
 |---|---|---|
 | 1 | Admin login, cookie import, verify uplink, terminal UI, Vercel-ready storage | **done and live** (2026-10-13): private Blob store, cookies saved, uplink verified on the deployed site, 3 models listed. 42 tests pass |
 | 2 | Chat module (multi-turn, file attachments, history) | built and tested: local tests (56), browser smoke test. Live check pending deploy |
-| 3 | Image generation module | not started |
+| 3 | Image generation module | built and tested: local tests (67), browser smoke test. Live check pending deploy |
 | 4 | Deep research module (background jobs, polling, report view) | not started |
 | — | ChatGPT client (unofficial, cookie-based) | not started |
 
@@ -62,11 +62,13 @@ app/
   gemini_service.py       GeminiService: verify, status, require_client (per event loop)
   records.py              JsonStore (records and index lists), FeatureError, error handlers
   chat_service.py         ChatService: multi-turn sends, attachments, history in chats/
-  feature_routes.py       routers for /api/chat (admin only)
+  image_service.py        ImageService: generate, keep bytes in images/, serve, delete
+  feature_routes.py       routers for /api/chat and /api/image (admin only)
 static/                   index.html, style.css, app.js (no build step, textContent only)
 tests/test_step1.py       37 tests; fake Gemini client and in-memory Blob HTTP
 tests/test_storage_errors.py  5 tests; Blob refusals and network failures
 tests/test_chat.py       14 tests; chat sends, attachments, errors, shared history
+tests/test_images.py    11 tests; prompts, stored bytes, admin-only serving, errors
 ```
 
 Key decisions:
@@ -158,16 +160,19 @@ set -a; . ./.env; set +a
   the saved chat can miss that turn. Re-check the Gemini app if it happens.
 - Index lists (chats/index.json) are read, changed and written back. Two sends at the
   same moment can lose one entry. Fine for one admin.
-- Image and deep research calls have not been tried live yet. Only the verify path
+- Image generation waits up to 45 s for Gemini, then 504. Gemini may still produce the
+  image. It is not saved in that case.
+- Images come only from generate_content. Images in chat replies are not saved yet.
+- Deep research calls have not been tried live yet. Only the verify path
   (login plus model listing) has run live.
 - The sandbox cannot reach Google, so live Gemini calls are tested only on the site.
 
 ## Next steps (in order)
 
-1. Step 2, chat: `POST /api/chat/send` (uses `require_client()`, supports files
+1. (Done) Step 2, chat: `POST /api/chat/send` (uses `require_client()`, supports files
    via base64 or multipart), `GET /api/chat/history`, and a CHAT screen. Store chat
    metadata in Blob, not in memory. Verify with a live test on the deployed site.
-2. Step 3, image generation: `POST /api/image/generate` returns the image(s),
+2. (Done) Step 3, image generation: `POST /api/image/generate` returns the image(s),
    saved to Blob, with a URL in the UI.
 3. Step 4, deep research: start job → store `{cid, research_id, status}` → poll
    endpoint → fetch report. Keep each request well under 60 s.

@@ -9,13 +9,20 @@ import base64
 import binascii
 from typing import Any
 
-from fastapi import APIRouter, Path
+from fastapi import APIRouter, Path, Response
 from pydantic import BaseModel, Field
 
 from .chat_service import ChatService
+from .image_service import ImageService
 from .records import ID_PATTERN, FeatureError
 
 CHAT_ID = Path(pattern=ID_PATTERN)
+IMAGE_ID = Path(pattern=ID_PATTERN)
+
+
+class ImageGenerateIn(BaseModel):
+    prompt: str = Field(min_length=1, max_length=1000)
+    model: str | None = Field(default=None, max_length=100)
 
 
 class FileIn(BaseModel):
@@ -63,6 +70,30 @@ def chat_router(service: ChatService) -> APIRouter:
     @router.delete("/{chat_id}")
     async def delete_chat(chat_id: str = CHAT_ID) -> dict[str, bool]:
         await service.delete_chat(chat_id)
+        return {"ok": True}
+
+    return router
+
+
+def image_router(service: ImageService) -> APIRouter:
+    router = APIRouter(prefix="/api/image")
+
+    @router.get("")
+    async def list_images() -> dict[str, Any]:
+        return {"images": await service.list_images()}
+
+    @router.post("/generate")
+    async def generate(body: ImageGenerateIn) -> dict[str, Any]:
+        return await service.generate(prompt=body.prompt, model=body.model)
+
+    @router.get("/{image_id}")
+    async def get_image(image_id: str = IMAGE_ID) -> Response:
+        record, data = await service.get_image(image_id)
+        return Response(content=data, media_type=record["mime"])
+
+    @router.delete("/{image_id}")
+    async def delete_image(image_id: str = IMAGE_ID) -> dict[str, bool]:
+        await service.delete_image(image_id)
         return {"ok": True}
 
     return router
