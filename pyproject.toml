@@ -1,2 +1,20 @@
+[project]
+name = "gemini-webui"
+version = "0.1.0"
+description = "Single-admin web UI over the unofficial gemini-webapi client, styled as a terminal archive."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.143.0",
+    "uvicorn==0.54.0",
+    "gemini-webapi==2.1.1",
+    "httpx==0.28.1",
+    "itsdangerous==2.2.0",
+    "python-multipart==0.0.32",
+]
+
+[tool.uv]
+# This is an app, not a library. Vercel only needs the lock file and dependencies.
+package = false
+
 [tool.vercel]
 entrypoint = "index:app"
