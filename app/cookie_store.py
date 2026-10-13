@@ -1,4 +1,4 @@
-"""Parsing and storage for the Gemini session cookies.
+"""Parsing and storage for the Gemini session cookies and their verification state.
 
 Accepted input (paste from the browser in any of these shapes):
 
@@ -10,21 +10,29 @@ Accepted input (paste from the browser in any of these shapes):
 4. Bare values: one token = PSID only; two tokens = PSID then PSIDTS.
 
 Only the two cookies the client needs are kept; everything else is dropped.
+The verification result (time, models, last error) is saved in the same record,
+so every serverless instance reports the same status.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from typing import Any
+
+from .storage import KeyValueStore
 
 PSID = "__Secure-1PSID"
 PSIDTS = "__Secure-1PSIDTS"
+RECORD_NAME = "gemini_cookies.json"
 
 _VALUE_RE = re.compile(r"^[A-Za-z0-9._\-~+/=]{10,}$")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def parse_cookie_text(text: str) -> tuple[str, str | None]:
@@ -79,48 +87,66 @@ def mask(value: str | None) -> str | None:
     return f"{value[:4]}…{value[-4:]}"
 
 
-@dataclass(frozen=True)
-class StoredCookies:
+@dataclass
+class CookieRecord:
     psid: str
     psidts: str | None
     saved_at: str
+    verified_at: str | None = None
+    models: list[dict[str, Any]] = field(default_factory=list)
+    last_error: str | None = None
+
+    def to_bytes(self) -> bytes:
+        return json.dumps(asdict(self)).encode("utf-8")
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> "CookieRecord | None":
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            return None
+        if not isinstance(data, dict) or not data.get("psid"):
+            return None
+        return cls(
+            psid=str(data["psid"]),
+            psidts=data.get("psidts") or None,
+            saved_at=str(data.get("saved_at", "")),
+            verified_at=data.get("verified_at") or None,
+            models=list(data.get("models") or []),
+            last_error=data.get("last_error") or None,
+        )
 
 
 class CookieStore:
-    """One JSON file holding the current cookie pair, readable by the owner only."""
+    """Reads and writes the single cookie record through a KeyValueStore."""
 
-    def __init__(self, path: Path) -> None:
-        self._path = path
+    def __init__(self, store: KeyValueStore) -> None:
+        self._store = store
 
-    def load(self) -> StoredCookies | None:
-        if not self._path.exists():
-            return None
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        psid = data.get("psid")
-        if not psid:
-            return None
-        return StoredCookies(
-            psid=psid,
-            psidts=data.get("psidts") or None,
-            saved_at=data.get("saved_at", ""),
-        )
+    async def load(self) -> CookieRecord | None:
+        raw = await self._store.read(RECORD_NAME)
+        return CookieRecord.from_bytes(raw) if raw else None
 
-    def save(self, psid: str, psidts: str | None) -> StoredCookies:
-        record = StoredCookies(
-            psid=psid,
-            psidts=psidts,
-            saved_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        )
-        tmp = self._path.with_name(self._path.name + ".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(record.__dict__, fh)
-        os.replace(tmp, self._path)
-        os.chmod(self._path, 0o600)
+    async def save(self, psid: str, psidts: str | None) -> CookieRecord:
+        record = CookieRecord(psid=psid, psidts=psidts, saved_at=utc_now())
+        await self._store.write(RECORD_NAME, record.to_bytes())
         return record
 
-    def clear(self) -> None:
-        self._path.unlink(missing_ok=True)
+    async def record_verification(
+        self,
+        *,
+        verified_at: str | None,
+        models: list[dict[str, Any]],
+        last_error: str | None,
+    ) -> CookieRecord | None:
+        record = await self.load()
+        if record is None:
+            return None  # cookies were purged while verifying
+        record.verified_at = verified_at
+        record.models = models
+        record.last_error = last_error
+        await self._store.write(RECORD_NAME, record.to_bytes())
+        return record
+
+    async def clear(self) -> None:
+        await self._store.delete(RECORD_NAME)

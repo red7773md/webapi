@@ -1,7 +1,9 @@
-"""Owns the single GeminiClient for this server and its verification state.
+"""Owns the Gemini client and reports verification status.
 
-The client is created lazily from the saved cookies and kept alive so later
-chat, image and research requests reuse one authenticated session.
+State lives in the cookie record (see cookie_store.py), so any serverless instance
+reports the same status. The live client is cached per event loop: serverless
+runtimes may reuse a process with a new loop, and a client bound to a closed loop
+must not be reused.
 """
 
 from __future__ import annotations
@@ -9,29 +11,25 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from datetime import datetime, timezone
 from typing import Any, Callable
 
 from gemini_webapi import AuthError, GeminiClient, GeminiError
 from gemini_webapi import TimeoutError as GeminiTimeoutError
 
-from .cookie_store import CookieStore, mask
+from .cookie_store import CookieStore, mask, utc_now
 
 log = logging.getLogger("gemini_webui")
 
+VERIFY_TIMEOUT_SECONDS = 45.0  # keep below the 60 s function limit set in vercel.json
 ClientFactory = Callable[[str, str | None], Any]
 
 
 class GeminiNotReady(RuntimeError):
-    """Raised when a feature needs a verified client and none is available."""
+    """A feature needs a verified Gemini client and none is available."""
 
 
 def _default_factory(psid: str, psidts: str | None) -> GeminiClient:
     return GeminiClient(psid, psidts)
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _serialise_models(client: Any) -> list[dict[str, Any]]:
@@ -50,117 +48,6 @@ def _serialise_models(client: Any) -> list[dict[str, Any]]:
     ]
 
 
-class GeminiService:
-    def __init__(self, store: CookieStore, factory: ClientFactory | None = None) -> None:
-        self._store = store
-        self._factory = factory or _default_factory
-        self._client: Any | None = None
-        self._lock = asyncio.Lock()
-        self._verified = False
-        self._verified_at: str | None = None
-        self._last_error: str | None = None
-        self._models: list[dict[str, Any]] = []
-
-    # ----- state -------------------------------------------------------------
-
-    def status(self) -> dict[str, Any]:
-        stored = self._store.load()
-        return {
-            "configured": stored is not None,
-            "psid_hint": mask(stored.psid) if stored else None,
-            "has_psidts": bool(stored and stored.psidts),
-            "saved_at": stored.saved_at if stored else None,
-            "verified": self._verified,
-            "verified_at": self._verified_at,
-            "last_error": self._last_error,
-            "models": self._models,
-        }
-
-    def require_client(self) -> Any:
-        """Return the verified client, or raise GeminiNotReady."""
-        if self._client is None or not self._verified:
-            raise GeminiNotReady("Gemini is not connected. Save cookies and verify on the SESSION screen.")
-        return self._client
-
-    # ----- mutations ---------------------------------------------------------
-
-    async def save_cookies(self, psid: str, psidts: str | None) -> dict[str, Any]:
-        async with self._lock:
-            await self._drop_client()
-            self._store.save(psid, psidts)
-            self._reset_state()
-        return self.status()
-
-    async def clear_cookies(self) -> dict[str, Any]:
-        async with self._lock:
-            await self._drop_client()
-            self._store.clear()
-            self._reset_state()
-        return self.status()
-
-    async def verify(self, timeout: float = 60.0) -> dict[str, Any]:
-        async with self._lock:
-            await self._drop_client()
-            self._reset_state()
-            stored = self._store.load()
-            if stored is None:
-                self._last_error = "No cookies saved yet."
-                return self.status()
-
-            client = self._factory(stored.psid, stored.psidts)
-            try:
-                await client.init(timeout=timeout, auto_refresh=True)
-            except AuthError:
-                self._last_error = (
-                    "Google rejected these cookies. Copy fresh values from a logged-in browser session."
-                )
-            except GeminiTimeoutError:
-                self._last_error = "Timed out reaching gemini.google.com. Check the network or proxy."
-            except GeminiError as exc:
-                self._last_error = f"Gemini client error: {exc}"
-            except Exception as exc:  # network or parsing failure
-                log.exception("Gemini verification failed")
-                if "connection" in type(exc).__name__.lower():
-                    self._last_error = (
-                        "Could not reach gemini.google.com. Check the network, proxy or firewall."
-                    )
-                else:
-                    self._last_error = f"Unexpected {type(exc).__name__}: {exc}"
-            else:
-                models = _serialise_models(client)
-                if not models:
-                    self._last_error = (
-                        "Connected, but no models were returned. The cookie set may be incomplete."
-                    )
-                    await _close_quietly(client)
-                    return self.status()
-                self._client = client
-                self._models = models
-                self._verified = True
-                self._verified_at = _utc_now()
-                return self.status()
-
-            await _close_quietly(client)
-            return self.status()
-
-    async def shutdown(self) -> None:
-        async with self._lock:
-            await self._drop_client()
-
-    # ----- internals ---------------------------------------------------------
-
-    def _reset_state(self) -> None:
-        self._verified = False
-        self._verified_at = None
-        self._last_error = None
-        self._models = []
-
-    async def _drop_client(self) -> None:
-        if self._client is not None:
-            await _close_quietly(self._client)
-            self._client = None
-
-
 async def _close_quietly(client: Any) -> None:
     """Close a client whether its close() is sync or async (GeminiClient.close is async)."""
     close = getattr(client, "close", None)
@@ -172,3 +59,130 @@ async def _close_quietly(client: Any) -> None:
             await result
     except Exception:
         log.debug("client close failed", exc_info=True)
+
+
+def _describe_failure(exc: Exception) -> str:
+    if isinstance(exc, AuthError):
+        return "Google rejected these cookies. Copy fresh values from a logged-in browser session."
+    if isinstance(exc, GeminiTimeoutError):
+        return "Timed out reaching gemini.google.com. Try again, or check the network."
+    if isinstance(exc, GeminiError):
+        return f"Gemini client error: {exc}"
+    if "connection" in type(exc).__name__.lower():
+        return "Could not reach gemini.google.com. Check the network, proxy or firewall."
+    return f"Unexpected {type(exc).__name__}: {exc}"
+
+
+class GeminiService:
+    def __init__(
+        self,
+        cookies: CookieStore,
+        factory: ClientFactory | None = None,
+        storage_label: str = "",
+    ) -> None:
+        self._cookies = cookies
+        self._factory = factory or _default_factory
+        self._storage_label = storage_label
+        self._client: Any | None = None
+        self._client_loop: asyncio.AbstractEventLoop | None = None
+        self._lock: asyncio.Lock | None = None
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
+
+    def _mutex(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        return self._lock
+
+    # ----- status ------------------------------------------------------------
+
+    async def status(self) -> dict[str, Any]:
+        rec = await self._cookies.load()
+        verified = bool(rec and rec.verified_at and not rec.last_error)
+        return {
+            "storage": self._storage_label,
+            "configured": rec is not None,
+            "psid_hint": mask(rec.psid) if rec else None,
+            "has_psidts": bool(rec and rec.psidts),
+            "saved_at": rec.saved_at if rec else None,
+            "verified": verified,
+            "verified_at": rec.verified_at if rec else None,
+            "last_error": rec.last_error if rec else None,
+            "models": rec.models if rec else [],
+        }
+
+    # ----- mutations ---------------------------------------------------------
+
+    async def save_cookies(self, psid: str, psidts: str | None) -> dict[str, Any]:
+        async with self._mutex():
+            await self._drop_client()
+            await self._cookies.save(psid, psidts)
+        return await self.status()
+
+    async def clear_cookies(self) -> dict[str, Any]:
+        async with self._mutex():
+            await self._drop_client()
+            await self._cookies.clear()
+        return await self.status()
+
+    async def verify(self, timeout: float = VERIFY_TIMEOUT_SECONDS) -> dict[str, Any]:
+        async with self._mutex():
+            await self._drop_client()
+            rec = await self._cookies.load()
+            if rec is None:
+                return await self.status()
+
+            client = self._factory(rec.psid, rec.psidts)
+            error: str | None = None
+            models: list[dict[str, Any]] = []
+            try:
+                await client.init(timeout=timeout, auto_refresh=True)
+                models = _serialise_models(client)
+                if not models:
+                    error = "Connected, but no models were returned. The cookie set may be incomplete."
+            except Exception as exc:
+                if not isinstance(exc, (AuthError, GeminiError)):
+                    log.exception("Gemini verification failed")
+                error = _describe_failure(exc)
+
+            if error is None:
+                self._client = client
+                self._client_loop = asyncio.get_running_loop()
+                await self._cookies.record_verification(verified_at=utc_now(), models=models, last_error=None)
+            else:
+                await _close_quietly(client)
+                await self._cookies.record_verification(verified_at=None, models=[], last_error=error)
+        return await self.status()
+
+    async def require_client(self) -> Any:
+        """Return a connected client for the current event loop, reconnecting if needed."""
+        loop = asyncio.get_running_loop()
+        if self._client is not None and self._client_loop is loop:
+            return self._client
+        async with self._mutex():
+            rec = await self._cookies.load()
+            if rec is None or not rec.verified_at or rec.last_error:
+                raise GeminiNotReady("Gemini is not connected. Save cookies and verify on the SESSION screen.")
+            await self._drop_client()
+            client = self._factory(rec.psid, rec.psidts)
+            try:
+                await client.init(timeout=VERIFY_TIMEOUT_SECONDS, auto_refresh=True)
+            except Exception as exc:
+                await _close_quietly(client)
+                raise GeminiNotReady(_describe_failure(exc)) from exc
+            self._client = client
+            self._client_loop = loop
+            return client
+
+    async def shutdown(self) -> None:
+        async with self._mutex():
+            await self._drop_client()
+
+    # ----- internals ---------------------------------------------------------
+
+    async def _drop_client(self) -> None:
+        if self._client is not None:
+            await _close_quietly(self._client)
+        self._client = None
+        self._client_loop = None

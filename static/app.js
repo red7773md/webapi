@@ -284,6 +284,7 @@
 
     const draw = (st) => {
       const rows = [
+        ["STORAGE", st.storage || "—", ""],
         ["LINK", st.configured ? "cookies on file" : "no cookies", st.configured ? "ok" : "warn"],
         ["PSID", st.psid_hint || "—", ""],
         ["PSIDTS", st.has_psidts ? "present" : "absent", st.has_psidts ? "ok" : "warn"],

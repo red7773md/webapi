@@ -1,8 +1,8 @@
 """FastAPI application: admin login, Gemini session management, static terminal UI.
 
-Run locally:
-    ADMIN_USERNAME=admin ADMIN_PASSWORD='change-me' \
-      .venv/bin/uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
+Local run:
+    .venv/bin/uvicorn index:app --host 127.0.0.1 --port 8000
+Vercel: index.py exposes `app`, built by app.entrypoint.build_entrypoint().
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from .config import BASE_DIR, Settings, load_settings
 from .cookie_store import CookieStore, parse_cookie_text
 from .gemini_service import GeminiService
 from .security import LoginThrottle, credentials_match
+from .storage import BlobStore, KeyValueStore, LocalFileStore
 
 STATIC_DIR = BASE_DIR / "static"
 SESSION_COOKIE = "gwui_session"
@@ -48,12 +49,25 @@ class CookieIn(BaseModel):
     cookies: str = Field(max_length=20_000)
 
 
+def _client_key(request: Request, behind_proxy: bool) -> str:
+    """Key for the login throttle. Behind Vercel's proxy, the real IP is the first X-Forwarded-For entry."""
+    if behind_proxy:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else "unknown"
+
+
 def create_app(
     settings: Settings | None = None,
     gemini_factory: Callable[[str, str | None], Any] | None = None,
+    store: KeyValueStore | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
-    service = GeminiService(CookieStore(settings.data_dir / "gemini_cookies.json"), factory=gemini_factory)
+    if store is None:
+        store = BlobStore(settings.blob_token) if settings.blob_token else LocalFileStore(settings.data_dir)
+    service = GeminiService(CookieStore(store), factory=gemini_factory, storage_label=settings.storage_label)
     throttle = LoginThrottle()
 
     @asynccontextmanager
@@ -109,7 +123,7 @@ def create_app(
 
     @app.post("/api/auth/login")
     async def login(body: LoginIn, request: Request) -> dict[str, Any]:
-        key = request.client.host if request.client else "unknown"
+        key = _client_key(request, settings.on_vercel)
         wait = throttle.retry_after(key)
         if wait > 0:
             raise HTTPException(
@@ -144,7 +158,7 @@ def create_app(
 
     @app.get("/api/session", dependencies=[admin])
     async def session_status() -> dict[str, Any]:
-        return service.status()
+        return await service.status()
 
     @app.post("/api/session/cookies", dependencies=[admin])
     async def save_cookies(body: CookieIn) -> Any:
