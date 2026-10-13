@@ -20,7 +20,7 @@ from .config import BASE_DIR, Settings, load_settings
 from .cookie_store import CookieStore, parse_cookie_text
 from .gemini_service import GeminiService
 from .security import LoginThrottle, credentials_match
-from .storage import BlobStore, KeyValueStore, LocalFileStore
+from .storage import BlobStore, KeyValueStore, LocalFileStore, StorageError
 
 STATIC_DIR = BASE_DIR / "static"
 SESSION_COOKIE = "gwui_session"
@@ -175,6 +175,10 @@ def create_app(
     @app.post("/api/session/verify", dependencies=[admin])
     async def verify_cookies() -> dict[str, Any]:
         return await service.verify()
+
+    @app.exception_handler(StorageError)
+    async def storage_unavailable(_: Request, exc: StorageError) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
 
     app.state.gemini = service
     return app

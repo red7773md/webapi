@@ -1,20 +1,23 @@
 """Small key-value storage with two backends.
 
 LocalFileStore  files in a folder (local development without Blob)
-BlobStore       a private Vercel Blob store over its HTTP API (production)
+BlobStore       a PRIVATE Vercel Blob store over its HTTP API (production)
 
 Both store opaque bytes under a name; callers choose the format.
 
 The Blob endpoints and headers were taken from the official @vercel/blob SDK
 (v2.8.x, BLOB_API_VERSION = 12). Each request opens its own HTTP client so the
 store keeps working across serverless invocations that may use different event loops.
+
+Failures from Blob raise StorageError with a plain message. The message carries
+Vercel's own reason when it gives one. It never includes the token.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -23,6 +26,12 @@ from .config import ConfigError
 API_BASE = "https://blob.vercel-storage.com"
 API_VERSION = "12"
 TIMEOUT_SECONDS = 15.0
+REASON_MAX_CHARS = 200
+PRIVATE_STORE_HINT = " This app needs a PRIVATE Blob store. Check the store's access setting in Vercel."
+
+
+class StorageError(RuntimeError):
+    """Storage is unreachable or refused a request. The message is safe to show the admin."""
 
 
 class KeyValueStore(Protocol):
@@ -68,6 +77,38 @@ def store_id_from_token(token: str) -> str:
     return parts[3]
 
 
+def _vercel_reason(resp: httpx.Response) -> str:
+    """Pull a short human reason out of a Vercel error response, if there is one."""
+    text = ""
+    try:
+        body: Any = resp.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            text = str(err.get("message") or err.get("code") or "")
+        elif err:
+            text = str(err)
+        else:
+            text = str(body.get("message") or "")
+    if not text:
+        text = resp.text or ""
+    text = " ".join(text.split())
+    return text[:REASON_MAX_CHARS]
+
+
+def _rejected(action: str, resp: httpx.Response) -> StorageError:
+    reason = _vercel_reason(resp)
+    message = f"Vercel Blob {action} failed with HTTP {resp.status_code}"
+    if reason:
+        message += f": {reason}"
+    message += "."
+    if resp.status_code in (400, 403):
+        message += PRIVATE_STORE_HINT
+    return StorageError(message)
+
+
 class BlobStore:
     """Private Vercel Blob store. Objects live under `prefix/`."""
 
@@ -95,15 +136,19 @@ class BlobStore:
         return f"https://{self._store_id}.private.blob.vercel-storage.com/{pathname}"
 
     async def read(self, name: str) -> bytes | None:
-        async with self._client() as client:
-            resp = await client.get(
-                self._object_url(self._pathname(name)),
-                params={"cache": "0"},
-                headers=self._auth_headers(),
-            )
+        try:
+            async with self._client() as client:
+                resp = await client.get(
+                    self._object_url(self._pathname(name)),
+                    params={"cache": "0"},
+                    headers=self._auth_headers(),
+                )
+        except httpx.HTTPError as exc:
+            raise StorageError(f"Could not reach Vercel Blob ({type(exc).__name__}). Try again.") from exc
         if resp.status_code == 404:
             return None
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise _rejected("read", resp)
         return resp.content
 
     async def write(self, name: str, data: bytes) -> None:
@@ -115,22 +160,29 @@ class BlobStore:
             "x-add-random-suffix": "0",
             "x-allow-overwrite": "1",
         }
-        async with self._client() as client:
-            resp = await client.put(
-                f"{API_BASE}/",
-                params={"pathname": self._pathname(name)},
-                content=data,
-                headers=headers,
-            )
-        resp.raise_for_status()
+        try:
+            async with self._client() as client:
+                resp = await client.put(
+                    f"{API_BASE}/",
+                    params={"pathname": self._pathname(name)},
+                    content=data,
+                    headers=headers,
+                )
+        except httpx.HTTPError as exc:
+            raise StorageError(f"Could not reach Vercel Blob ({type(exc).__name__}). Try again.") from exc
+        if resp.status_code >= 400:
+            raise _rejected("write", resp)
 
     async def delete(self, name: str) -> None:
         url = self._object_url(self._pathname(name))
-        async with self._client() as client:
-            resp = await client.post(
-                f"{API_BASE}/delete",
-                json={"urls": [url]},
-                headers=self._auth_headers(),
-            )
-        if resp.status_code != 404:
-            resp.raise_for_status()
+        try:
+            async with self._client() as client:
+                resp = await client.post(
+                    f"{API_BASE}/delete",
+                    json={"urls": [url]},
+                    headers=self._auth_headers(),
+                )
+        except httpx.HTTPError as exc:
+            raise StorageError(f"Could not reach Vercel Blob ({type(exc).__name__}). Try again.") from exc
+        if resp.status_code != 404 and resp.status_code >= 400:
+            raise _rejected("delete", resp)

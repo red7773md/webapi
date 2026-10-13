@@ -38,7 +38,8 @@ a Vercel Blob store instead.
 
 1. Import the repo into Vercel. No build step is needed.
 2. Create a **private** Blob store and connect it to the project. This adds
-   `BLOB_READ_WRITE_TOKEN` automatically.
+   `BLOB_READ_WRITE_TOKEN` automatically. A **public** store is refused: every cookie
+   save fails with a message that asks for a private store.
 3. Add these environment variables:
    - `ADMIN_USERNAME`
    - `ADMIN_PASSWORD` (a long random string)

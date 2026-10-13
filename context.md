@@ -94,8 +94,14 @@ Current state (2026-10-13):
   table in `pyproject.toml`. Fixed in `48c6040`. That build is READY.
 - `/healthz` returns 503 and names `ADMIN_USERNAME, ADMIN_PASSWORD, APP_SECRET_KEY,
   BLOB_READ_WRITE_TOKEN`. Nothing is configured yet, so this is expected.
-- Waiting on Emdad: create a private Blob store and connect it, then add the three
-  admin/secret variables, then redeploy. Do not print or request their values.
+- Env vars are set in production (ADMIN_USERNAME, ADMIN_PASSWORD, APP_SECRET_KEY).
+- Blocker found 2026-10-13: the connected Blob store `webapi-blob`
+  (store_wFSpDl6pMiJddTay) is **public**. The app writes with private access, so
+  every cookie save got HTTP 400 from Vercel. The store is empty, so nothing leaked.
+  Fix: connect a **private** store (remove the public one from the project first),
+  then redeploy. Access type is fixed at creation, so a new store is needed.
+- Since the "Readable storage errors" commit, the SESSION screen shows Vercel's reason
+  and the private-store hint in the ERROR row, instead of crashing with a 500.
 - Sandbox note: curl to the Vercel URL is refused by the egress proxy (403). Check the
   live site with the Vercel MCP `web_fetch_vercel_url` tool instead.
 

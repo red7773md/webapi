@@ -17,6 +17,7 @@ from gemini_webapi import AuthError, GeminiClient, GeminiError
 from gemini_webapi import TimeoutError as GeminiTimeoutError
 
 from .cookie_store import CookieStore, mask, utc_now
+from .storage import StorageError
 
 log = logging.getLogger("gemini_webui")
 
@@ -97,8 +98,26 @@ class GeminiService:
 
     # ----- status ------------------------------------------------------------
 
+    def _storage_down(self, message: str) -> dict[str, Any]:
+        """Status shown when the cookie record cannot be read. The screen still renders."""
+        return {
+            "storage": self._storage_label,
+            "configured": False,
+            "psid_hint": None,
+            "has_psidts": False,
+            "saved_at": None,
+            "verified": False,
+            "verified_at": None,
+            "last_error": message,
+            "models": [],
+        }
+
     async def status(self) -> dict[str, Any]:
-        rec = await self._cookies.load()
+        try:
+            rec = await self._cookies.load()
+        except StorageError as exc:
+            log.warning("cookie storage unavailable: %s", exc)
+            return self._storage_down(str(exc))
         verified = bool(rec and rec.verified_at and not rec.last_error)
         return {
             "storage": self._storage_label,
@@ -129,7 +148,10 @@ class GeminiService:
     async def verify(self, timeout: float = VERIFY_TIMEOUT_SECONDS) -> dict[str, Any]:
         async with self._mutex():
             await self._drop_client()
-            rec = await self._cookies.load()
+            try:
+                rec = await self._cookies.load()
+            except StorageError as exc:
+                return self._storage_down(str(exc))
             if rec is None:
                 return await self.status()
 
@@ -161,7 +183,10 @@ class GeminiService:
         if self._client is not None and self._client_loop is loop:
             return self._client
         async with self._mutex():
-            rec = await self._cookies.load()
+            try:
+                rec = await self._cookies.load()
+            except StorageError as exc:
+                raise GeminiNotReady(str(exc)) from exc
             if rec is None or not rec.verified_at or rec.last_error:
                 raise GeminiNotReady("Gemini is not connected. Save cookies and verify on the SESSION screen.")
             await self._drop_client()
