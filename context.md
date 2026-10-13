@@ -20,7 +20,10 @@ Risk accepted by Emdad: unofficial endpoints can break, and the account used
 - GitHub: `red7773md/webapi` (this project; deployed to Vercel from here)
 - Reference pattern: his Instagram MCP on Vercel, `red7773md/instagram-mcp-api`
   (Python, Upstash/Blob, entrypoint pattern). Not this project; only a model.
-- Vercel: project linked to `red7773md/webapi` (see "Deployment" below)
+- Vercel: project `webapi` (id `prj_QgfFfjnb1360s1v3ibi7MCS8yegH`, team
+  `emdadhussain950-gmailcoms-projects`), linked to `red7773md/webapi`, production
+  branch `main`. Live URL: https://webapi-emdadhussain950-gmailcoms-projects.vercel.app
+  (see "Deployment" below)
 - The sandbox cannot reach `gemini.google.com` (egress policy 403). Live Gemini
   tests must be run from Emdad's machine or the deployed app.
 
@@ -28,7 +31,7 @@ Risk accepted by Emdad: unofficial endpoints can break, and the account used
 
 | Step | What | State |
 |---|---|---|
-| 1 | Admin login, cookie import, verify uplink, terminal UI, Vercel-ready storage | done (37 tests pass) |
+| 1 | Admin login, cookie import, verify uplink, terminal UI, Vercel-ready storage | code done (37 tests pass); deployed, builds READY on `48c6040`; waiting for Emdad to add env vars and connect Blob |
 | 2 | Chat module (multi-turn, file attachments, history) | not started |
 | 3 | Image generation module | not started |
 | 4 | Deep research module (background jobs, polling, report view) | not started |
@@ -41,7 +44,7 @@ the Vercel dashboard for the live state, because this table can fall behind.
 
 ```
 index.py                  Vercel entrypoint: `app = build_entrypoint()`
-pyproject.toml            [tool.vercel] entrypoint = "index:app"
+pyproject.toml            [project] (needed by Vercel's `uv lock`) and [tool.vercel] entrypoint = "index:app"
 vercel.json               maxDuration 60 for index.py
 app/
   entrypoint.py           build_entrypoint(): real app, or a 503 app that names missing config
@@ -85,6 +88,18 @@ Key decisions:
 | `VERCEL` | set by Vercel | `1` enables Vercel mode |
 
 ## Deployment (Vercel)
+
+Current state (2026-10-13):
+- First build failed on `7e18c36`: Vercel runs `uv lock`, which needs a `[project]`
+  table in `pyproject.toml`. Fixed in `48c6040`. That build is READY.
+- `/healthz` returns 503 and names `ADMIN_USERNAME, ADMIN_PASSWORD, APP_SECRET_KEY,
+  BLOB_READ_WRITE_TOKEN`. Nothing is configured yet, so this is expected.
+- Waiting on Emdad: create a private Blob store and connect it, then add the three
+  admin/secret variables, then redeploy. Do not print or request their values.
+- Sandbox note: curl to the Vercel URL is refused by the egress proxy (403). Check the
+  live site with the Vercel MCP `web_fetch_vercel_url` tool instead.
+
+Steps:
 
 1. Create a **private** Blob store and connect it to the project. It must be
    private, because the code writes with `x-vercel-blob-access: private`. A public
