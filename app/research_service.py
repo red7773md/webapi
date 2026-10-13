@@ -155,8 +155,18 @@ class ResearchService:
         try:
             client = await self._gemini.require_client()
             plan = DeepResearchPlan.model_validate(job["plan"])
+            # The confirmation must continue the plan's chat with the same model. Without
+            # this, Gemini gets the confirmation with the default model and can reject it.
+            chat = client.start_chat(
+                metadata=list(plan.metadata),
+                cid=plan.cid or "",
+                model=job.get("model") or None,
+            )
             with _logged_stream(client):
-                await asyncio.wait_for(client.start_deep_research(plan), START_TIMEOUT_SECONDS)
+                await asyncio.wait_for(
+                    client.start_deep_research(plan, chat=chat),
+                    START_TIMEOUT_SECONDS,
+                )
         except Exception as exc:
             log.warning("research start failed after %.0f s: %s", time.monotonic() - started, exc)
             job["status"] = "failed"

@@ -50,6 +50,7 @@ class Backend:
         self.start_delay = 0.0
         self.init_calls: list[dict] = []  # every connect, so tests can read the budget
         self.verbose_seen: list[tuple[str, bool]] = []  # verbose flag seen by each call
+        self.start_chats: list[dict] = []  # the chat each confirmation continued
 
 
 class FakeOutput:
@@ -62,6 +63,13 @@ class FakeModel:
     model_name = "gemini-flash"
     display_name = "Flash"
     is_available = True
+
+
+class FakeChat:
+    def __init__(self, metadata=None, cid="", model=None) -> None:
+        self.metadata = list(metadata or [])
+        self.cid = cid
+        self.model = model
 
 
 class FakeClient:
@@ -93,8 +101,14 @@ class FakeClient:
             response_text="Here is my plan.",
         )
 
+    def start_chat(self, metadata=None, cid="", model=None, **_):
+        return FakeChat(metadata=metadata, cid=cid, model=model)
+
     async def start_deep_research(self, plan, chat=None, confirm_prompt=None):
         self._backend.verbose_seen.append(("start", getattr(self, "verbose", False)))
+        if chat is None:
+            raise AssertionError("the confirmation must continue the plan's chat")
+        self._backend.start_chats.append({"cid": chat.cid, "model": chat.model, "metadata": chat.metadata})
         if self._backend.start_delay:
             await asyncio.sleep(self._backend.start_delay)
         if self._backend.start_error is not None:
@@ -209,6 +223,17 @@ def test_plan_and_start_run_with_the_stream_log_on(env):
     job_id = new_plan(client)["id"]
     assert client.post(f"/api/research/{job_id}/start").status_code == 200
     assert backend.verbose_seen == [("plan", True), ("start", True)]
+
+
+def test_the_confirmation_continues_the_plans_chat_and_model(env):
+    client, backend, _ = env
+    job_id = client.post(
+        "/api/research", json={"prompt": "Indian economy", "model": "gemini-flash"}
+    ).json()["id"]
+    assert client.post(f"/api/research/{job_id}/start").status_code == 200
+    assert backend.start_chats == [
+        {"cid": "c_research", "model": "gemini-flash", "metadata": ["c_research", "r_1", "rc_1"]}
+    ]
 
 
 def test_a_failed_plan_logs_how_long_gemini_ran(env, caplog):

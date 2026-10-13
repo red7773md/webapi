@@ -168,6 +168,14 @@ set -a; . ./.env; set +a
 - Plan and start calls run with the library's verbose log on. Vercel logs show
   `research plan failed after N s` with the error, plus the HTTP status and whether the
   full reply arrived. Use these lines to find where a research request stops.
+- The confirmation (start) continues the plan's chat and model. Before this, it used
+  the default model and could be rejected.
+- gemini-webapi stays pinned at 2.1.1, the newest PyPI release. Upstream main has two
+  later commits (1 Oct, 8 Oct) for cookie drift and retries on network errors. They
+  change the login path, which works now, so they are not taken yet.
+- Open: Google ends the plan's reply after about 66 to 81 seconds, before the plan
+  arrives (four runs). The upstream CLI test decides whether this is specific to our
+  deploy or to the account or network.
 - Research reports come from the chat's latest deep research document. If the chat
   is changed in the Gemini app, the report can be missed.
 - Chat keeps no attachment files, only names and sizes. Gemini's own history is not
