@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import pytest
 from fastapi.testclient import TestClient
@@ -48,6 +49,7 @@ class Backend:
         self.start_error: Exception | None = None
         self.start_delay = 0.0
         self.init_calls: list[dict] = []  # every connect, so tests can read the budget
+        self.verbose_seen: list[tuple[str, bool]] = []  # verbose flag seen by each call
 
 
 class FakeOutput:
@@ -74,6 +76,7 @@ class FakeClient:
         return [FakeModel()]
 
     async def create_deep_research_plan(self, prompt, chat=None, model=None):
+        self._backend.verbose_seen.append(("plan", getattr(self, "verbose", False)))
         if self._backend.plan_delay:
             await asyncio.sleep(self._backend.plan_delay)
         if self._backend.plan_error is not None:
@@ -91,6 +94,7 @@ class FakeClient:
         )
 
     async def start_deep_research(self, plan, chat=None, confirm_prompt=None):
+        self._backend.verbose_seen.append(("start", getattr(self, "verbose", False)))
         if self._backend.start_delay:
             await asyncio.sleep(self._backend.start_delay)
         if self._backend.start_error is not None:
@@ -198,6 +202,22 @@ def test_gemini_is_given_the_full_reply_budget_for_planning(env):
         assert connect["watchdog_timeout"] == gemini_service.CLIENT_TIMEOUT_SECONDS
     assert gemini_service.CLIENT_TIMEOUT_SECONDS >= research_service.PLAN_TIMEOUT_SECONDS
     assert gemini_service.CLIENT_TIMEOUT_SECONDS >= research_service.START_TIMEOUT_SECONDS
+
+
+def test_plan_and_start_run_with_the_stream_log_on(env):
+    client, backend, _ = env
+    job_id = new_plan(client)["id"]
+    assert client.post(f"/api/research/{job_id}/start").status_code == 200
+    assert backend.verbose_seen == [("plan", True), ("start", True)]
+
+
+def test_a_failed_plan_logs_how_long_gemini_ran(env, caplog):
+    client, backend, _ = env
+    backend.plan_error = GeminiError("Gemini did not return a deep research plan.")
+    with caplog.at_level(logging.WARNING, logger="gemini_webui"):
+        assert client.post("/api/research", json={"prompt": "anything"}).status_code == 502
+    assert "research plan failed after" in caplog.text
+    assert "Gemini did not return a deep research plan" in caplog.text
 
 
 def test_a_started_research_cannot_be_started_again(env):

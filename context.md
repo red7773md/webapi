@@ -165,6 +165,9 @@ set -a; . ./.env; set +a
   shows failed with that note; check the Gemini app before pressing RETRY START.
 - A plan that times out (240 s) is lost. The plan chat may exist in Gemini, but this
   app does not know its ID, so retry from the topic.
+- Plan and start calls run with the library's verbose log on. Vercel logs show
+  `research plan failed after N s` with the error, plus the HTTP status and whether the
+  full reply arrived. Use these lines to find where a research request stops.
 - Research reports come from the chat's latest deep research document. If the chat
   is changed in the Gemini app, the report can be missed.
 - Chat keeps no attachment files, only names and sizes. Gemini's own history is not

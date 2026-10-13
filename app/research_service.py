@@ -9,6 +9,10 @@ The report lives in the chat, so it survives even if this server restarts.
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,6 +21,8 @@ from gemini_webapi import DeepResearchPlan
 from .cookie_store import utc_now
 from .gemini_service import GeminiNotReady, GeminiService, describe_failure
 from .records import FeatureError, JsonStore, new_id
+
+log = logging.getLogger("gemini_webui")
 
 RESEARCH_INDEX = "research/index.json"
 MAX_PROMPT_CHARS = 1000
@@ -51,6 +57,18 @@ def _start_failure_message(exc: Exception) -> str:
     if isinstance(exc, GeminiNotReady):
         return str(exc)
     return describe_failure(exc)
+
+
+@contextmanager
+def _logged_stream(client: Any) -> Iterator[None]:
+    """Turn on the library's verbose log for one call: the HTTP status, and whether the
+    full reply arrived. The log does not contain cookie values. Turned back off after."""
+    previous = getattr(client, "verbose", False)
+    client.verbose = True
+    try:
+        yield
+    finally:
+        client.verbose = previous
 
 
 def _summary(job: dict[str, Any]) -> dict[str, Any]:
@@ -91,10 +109,16 @@ class ResearchService:
             raise FeatureError(422, f"Research topic is longer than {MAX_PROMPT_CHARS} characters.")
 
         client = await self._gemini.require_client()
-        plan = await asyncio.wait_for(
-            client.create_deep_research_plan(prompt, model=model or None),
-            PLAN_TIMEOUT_SECONDS,
-        )
+        started = time.monotonic()
+        try:
+            with _logged_stream(client):
+                plan = await asyncio.wait_for(
+                    client.create_deep_research_plan(prompt, model=model or None),
+                    PLAN_TIMEOUT_SECONDS,
+                )
+        except Exception as exc:
+            log.warning("research plan failed after %.0f s: %s", time.monotonic() - started, exc)
+            raise
         now = utc_now()
         job: dict[str, Any] = {
             "id": new_id(),
@@ -127,11 +151,14 @@ class ResearchService:
         job["error"] = None
         job["updated_at"] = utc_now()
         await self._save(job)
+        started = time.monotonic()
         try:
             client = await self._gemini.require_client()
             plan = DeepResearchPlan.model_validate(job["plan"])
-            await asyncio.wait_for(client.start_deep_research(plan), START_TIMEOUT_SECONDS)
+            with _logged_stream(client):
+                await asyncio.wait_for(client.start_deep_research(plan), START_TIMEOUT_SECONDS)
         except Exception as exc:
+            log.warning("research start failed after %.0f s: %s", time.monotonic() - started, exc)
             job["status"] = "failed"
             job["error"] = _start_failure_message(exc)
             job["updated_at"] = utc_now()
