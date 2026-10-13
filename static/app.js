@@ -239,6 +239,7 @@
     if (key === "session") sessionView(view);
     else if (key === "chat") chatView(view);
     else if (key === "image") imageView(view);
+    else if (key === "research") researchView(view);
     else offlineView(view, mod);
   }
 
@@ -830,6 +831,339 @@
 
     setBusy(true);
     Promise.all([fillModelSelect(modelSelect), loadGallery()])
+      .catch(fail)
+      .finally(() => setBusy(false));
+  }
+
+  // ----- RESEARCH module -----------------------------------------------------
+
+  const RESEARCH_POLL_MS = 6000;
+  const RESEARCH_MAX_RETRIES = 5;
+  const RESEARCH_STATUS = {
+    planned: "PLAN READY. not started",
+    starting: "STARTING...",
+    running: "RUNNING on gemini",
+    done: "REPORT READY",
+    failed: "FAILED",
+  };
+
+  const elapsed = (iso) => {
+    const seconds = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+    return `${Math.floor(seconds / 60)}m ${pad(seconds % 60)}s`;
+  };
+
+  const isWebUrl = (value) => typeof value === "string" && /^https?:\/\//i.test(value);
+
+  function researchView(view) {
+    let currentId = null;
+    let jobs = [];
+    let pollTimer = null;
+    let alive = true;
+    let retries = 0;
+    const urls = []; // object URLs for downloads, released when the screen is left
+
+    window.addEventListener(
+      "hashchange",
+      () => {
+        alive = false;
+        clearTimeout(pollTimer);
+        urls.forEach((u) => URL.revokeObjectURL(u));
+      },
+      { once: true },
+    );
+
+    const listBox = el("ul", { class: "chat-list", "aria-label": "Research jobs" });
+    const topic = el("textarea", {
+      class: "field composer",
+      id: "research-topic",
+      rows: 3,
+      maxlength: 1000,
+      placeholder: "Research question or topic.  Ctrl+Enter to make a plan.",
+    });
+    const modelSelect = el(
+      "select",
+      { class: "field select", id: "research-model", "aria-label": "Model" },
+      el("option", { value: "", text: "default model" }),
+    );
+    const planBtn = el("button", { class: "btn", type: "button", onclick: () => makePlan(), text: "[ MAKE PLAN ]" });
+    const newBtn = el("button", { class: "btn", type: "button", onclick: () => showNew(), text: "[ NEW ]" });
+    const notice = el("div", { class: "status", role: "status", "aria-live": "polite" });
+    const detail = el("div", { class: "research-detail", "aria-live": "polite" });
+    const controls = [topic, modelSelect, planBtn];
+
+    const setBusy = (on) => controls.forEach((c) => (c.disabled = on));
+    const setNotice = (text, cls = "") => {
+      notice.className = `status ${cls}`.trim();
+      notice.textContent = text;
+    };
+    const fail = (err) => {
+      if (isAuthError(err)) {
+        renderLogin(undefined, "session expired. authenticate again.");
+        return;
+      }
+      setNotice(err.message, "bad");
+    };
+
+    const drawList = () => {
+      if (!jobs.length) {
+        listBox.replaceChildren(el("li", { class: "dim", text: "no research yet" }));
+        return;
+      }
+      listBox.replaceChildren(
+        ...jobs.map((j) =>
+          el(
+            "li",
+            null,
+            el("button", {
+              class: `chat-item${j.id === currentId ? " current" : ""}`,
+              type: "button",
+              onclick: () => openJob(j.id),
+              text: j.title || j.prompt,
+            }),
+            el("div", { class: "dim", text: `${RESEARCH_STATUS[j.status] || j.status}` }),
+          ),
+        ),
+      );
+    };
+
+    const loadList = async () => {
+      const res = await api("/api/research");
+      jobs = res.jobs || [];
+      drawList();
+    };
+
+    const planBlock = (plan) =>
+      el(
+        "div",
+        { class: "plan" },
+        el("div", { class: "dim", text: "PROPOSED PLAN" }),
+        plan.eta_text ? el("p", { class: "hint", text: `estimated time: ${plan.eta_text}` }) : null,
+        el("ol", { class: "plan-steps" }, (plan.steps || []).map((s) => el("li", { text: s }))),
+      );
+
+    const sourcesBlock = (sources) =>
+      sources.length
+        ? el(
+            "ol",
+            { class: "sources" },
+            sources.map((s) =>
+              el(
+                "li",
+                null,
+                el("span", { text: s.title || "source" }),
+                isWebUrl(s.url) ? " " : null,
+                isWebUrl(s.url) ? el("a", { href: s.url, target: "_blank", rel: "noopener noreferrer", text: s.url }) : null,
+              ),
+            ),
+          )
+        : null;
+
+    const reportBlock = (job) => {
+      const url = URL.createObjectURL(new Blob([job.report || ""], { type: "text/markdown" }));
+      urls.push(url);
+      return el(
+        "div",
+        { class: "report" },
+        el("div", { class: "dim", text: job.report_title ? `REPORT: ${job.report_title}` : "REPORT" }),
+        el("pre", { class: "body", text: job.report || "" }),
+        el("div", { class: "dim", text: "SOURCES" }),
+        sourcesBlock(job.sources || []) || el("p", { class: "hint", text: "no web sources were cited." }),
+        el("div", { class: "actions" },
+          el("a", { class: "btn", href: url, download: `research-${job.id}.md`, text: "[ DOWNLOAD .MD ]" })),
+      );
+    };
+
+    const drawJob = (job) => {
+      const statusText =
+        job.status === "running" && job.started_at
+          ? `${RESEARCH_STATUS.running} for ${elapsed(job.started_at)}`
+          : RESEARCH_STATUS[job.status] || job.status;
+      const cls = job.status === "failed" ? "bad" : job.status === "done" ? "ok" : "warn";
+      detail.replaceChildren(
+        el("h3", { class: "sub", text: job.title || job.prompt }),
+        el(
+          "div",
+          { class: "kv" },
+          el("div", { class: "k", text: "STATUS" }),
+          el("div", { class: `v ${cls}`, text: statusText }),
+          el("div", { class: "k", text: "TOPIC" }),
+          el("div", { class: "v", text: job.prompt }),
+        ),
+        job.status !== "done" && job.plan ? planBlock(job.plan) : null,
+        job.status === "running"
+          ? el("p", { class: "hint", text: "Gemini is researching. This page checks every few seconds. You can leave and come back." })
+          : null,
+        job.status === "failed" ? el("p", { class: "bad", text: job.error || "research failed." }) : null,
+        job.status === "planned" || job.status === "failed"
+          ? el(
+              "div",
+              { class: "actions" },
+              el("button", {
+                class: "btn",
+                type: "button",
+                onclick: () => startJob(job.id),
+                text: job.status === "failed" ? "[ RETRY START ]" : "[ START RESEARCH ]",
+              }),
+            )
+          : null,
+        job.status === "done" ? reportBlock(job) : null,
+        el(
+          "div",
+          { class: "actions" },
+          el("button", { class: "btn danger", type: "button", onclick: () => removeJob(job.id), text: "[ DELETE ]" }),
+        ),
+      );
+    };
+
+    const schedulePoll = (id) => {
+      clearTimeout(pollTimer);
+      if (!alive) return;
+      pollTimer = setTimeout(() => pollJob(id), RESEARCH_POLL_MS);
+    };
+
+    async function pollJob(id) {
+      if (!alive || currentId !== id) return;
+      try {
+        const job = await api(`/api/research/${id}`);
+        if (!alive || currentId !== id) return;
+        retries = 0;
+        drawJob(job);
+        if (job.status === "running") schedulePoll(id);
+        else await loadList();
+      } catch (err) {
+        if (isAuthError(err)) return fail(err);
+        const transient = err.status >= 500;
+        if (transient && retries < RESEARCH_MAX_RETRIES) {
+          retries += 1;
+          setNotice(`connection hiccup, retrying (${retries}/${RESEARCH_MAX_RETRIES})...`, "warn");
+          schedulePoll(id);
+          return;
+        }
+        fail(err);
+      }
+    }
+
+    async function openJob(id) {
+      clearTimeout(pollTimer);
+      currentId = id;
+      drawList();
+      setBusy(true);
+      try {
+        const job = await api(`/api/research/${id}`);
+        drawJob(job);
+        setNotice("", "");
+        if (job.status === "running") schedulePoll(id);
+      } catch (err) {
+        fail(err);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function showNew() {
+      clearTimeout(pollTimer);
+      currentId = null;
+      detail.replaceChildren(el("p", { class: "dim", text: "make a plan, read it, then start the research." }));
+      drawList();
+      setNotice("", "");
+      topic.focus();
+    }
+
+    async function makePlan() {
+      const text = topic.value.trim();
+      if (!text) {
+        setNotice("type a research topic first.", "warn");
+        return;
+      }
+      setBusy(true);
+      setNotice("making a research plan with gemini... (up to a minute)", "dim");
+      try {
+        const job = await api("/api/research", {
+          method: "POST",
+          body: { prompt: text, model: modelSelect.value || null },
+        });
+        topic.value = "";
+        currentId = job.id;
+        drawJob(job);
+        await loadList();
+        setNotice("plan ready. start the research when you are happy with it.", "ok");
+      } catch (err) {
+        fail(err);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function startJob(id) {
+      clearTimeout(pollTimer);
+      setBusy(true);
+      setNotice("asking gemini to start the research...", "dim");
+      try {
+        const job = await api(`/api/research/${id}/start`, { method: "POST" });
+        drawJob(job);
+        retries = 0;
+        setNotice("research started. this can take 5 to 10 minutes.", "ok");
+        schedulePoll(id);
+        await loadList();
+      } catch (err) {
+        fail(err);
+        if (currentId === id) await openJob(id).catch(() => {});
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function removeJob(id) {
+      if (!window.confirm("Delete this research from the archive? The Gemini chat is not touched.")) return;
+      try {
+        await api(`/api/research/${id}`, { method: "DELETE" });
+        if (currentId === id) showNew();
+        await loadList();
+        setNotice("research deleted from the archive.", "warn");
+      } catch (err) {
+        fail(err);
+      }
+    }
+
+    topic.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        makePlan();
+      }
+    });
+
+    view.replaceChildren(
+      panelTitle("research // gemini"),
+      el(
+        "p",
+        { class: "hint" },
+        "Gemini drafts a plan first. You start it when the plan looks right. ",
+        "Research takes several minutes and needs an account that has deep research.",
+      ),
+      el(
+        "div",
+        { class: "chat-layout" },
+        el(
+          "aside",
+          { class: "chat-side" },
+          el("div", { class: "actions" }, newBtn),
+          el("div", { class: "hint", text: "saved research" }),
+          listBox,
+        ),
+        el(
+          "section",
+          { class: "chat-main" },
+          topic,
+          el("div", { class: "composer-row" }, modelSelect, planBtn),
+          notice,
+          detail,
+        ),
+      ),
+    );
+
+    showNew();
+    setBusy(true);
+    Promise.all([loadList(), fillModelSelect(modelSelect)])
       .catch(fail)
       .finally(() => setBusy(false));
   }

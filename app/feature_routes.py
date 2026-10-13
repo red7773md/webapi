@@ -14,10 +14,17 @@ from pydantic import BaseModel, Field
 
 from .chat_service import ChatService
 from .image_service import ImageService
+from .research_service import ResearchService
 from .records import ID_PATTERN, FeatureError
 
 CHAT_ID = Path(pattern=ID_PATTERN)
 IMAGE_ID = Path(pattern=ID_PATTERN)
+RESEARCH_ID = Path(pattern=ID_PATTERN)
+
+
+class ResearchIn(BaseModel):
+    prompt: str = Field(min_length=1, max_length=1000)
+    model: str | None = Field(default=None, max_length=100)
 
 
 class ImageGenerateIn(BaseModel):
@@ -94,6 +101,33 @@ def image_router(service: ImageService) -> APIRouter:
     @router.delete("/{image_id}")
     async def delete_image(image_id: str = IMAGE_ID) -> dict[str, bool]:
         await service.delete_image(image_id)
+        return {"ok": True}
+
+    return router
+
+
+def research_router(service: ResearchService) -> APIRouter:
+    router = APIRouter(prefix="/api/research")
+
+    @router.get("")
+    async def list_jobs() -> dict[str, Any]:
+        return {"jobs": await service.list_jobs()}
+
+    @router.post("")
+    async def create(body: ResearchIn) -> dict[str, Any]:
+        return await service.create(prompt=body.prompt, model=body.model)
+
+    @router.post("/{job_id}/start")
+    async def start(job_id: str = RESEARCH_ID) -> dict[str, Any]:
+        return await service.start(job_id)
+
+    @router.get("/{job_id}")
+    async def poll(job_id: str = RESEARCH_ID) -> dict[str, Any]:
+        return await service.poll(job_id)
+
+    @router.delete("/{job_id}")
+    async def delete(job_id: str = RESEARCH_ID) -> dict[str, bool]:
+        await service.delete_job(job_id)
         return {"ok": True}
 
     return router

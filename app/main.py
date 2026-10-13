@@ -19,8 +19,9 @@ from starlette.middleware.sessions import SessionMiddleware
 from .config import BASE_DIR, Settings, load_settings
 from .cookie_store import CookieStore, parse_cookie_text
 from .chat_service import ChatService
-from .feature_routes import chat_router, image_router
+from .feature_routes import chat_router, image_router, research_router
 from .image_service import ImageService
+from .research_service import ResearchService
 from .gemini_service import GeminiService
 from .records import JsonStore, register_error_handlers
 from .security import LoginThrottle, credentials_match
@@ -75,6 +76,7 @@ def create_app(
     records = JsonStore(store)
     chats = ChatService(service, records)
     images = ImageService(service, records)
+    research = ResearchService(service, records)
     throttle = LoginThrottle()
 
     @asynccontextmanager
@@ -196,6 +198,10 @@ def create_app(
     # ----- image generation -------------------------------------------------
 
     app.include_router(image_router(images), dependencies=[admin])
+
+    # ----- deep research (plan, start, short polls) -------------------------
+
+    app.include_router(research_router(research), dependencies=[admin])
 
     app.state.gemini = service
     return app

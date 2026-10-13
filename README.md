@@ -16,7 +16,7 @@ See `context.md` for the full project context, decisions and next steps.
 - [x] Step 1: admin login, cookie import, uplink verification, terminal UI, Vercel-ready storage
 - [x] Step 2: chat (multi-turn, file attachments, history)
 - [x] Step 3: image generation
-- [ ] Step 4: deep research
+- [x] Step 4: deep research (plan, confirm, background polling, report view)
 
 ## Run locally
 

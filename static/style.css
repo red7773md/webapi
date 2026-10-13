@@ -430,6 +430,42 @@ textarea.composer { min-height: 96px; }
   margin: 0 auto 10px;
 }
 
+/* ----- research ---------------------------------------------------------- */
+
+.research-detail { margin-top: 14px; min-width: 0; }
+
+.sub {
+  margin: 0 0 8px;
+  font-weight: normal;
+  color: var(--amber);
+  overflow-wrap: anywhere;
+}
+
+.plan { margin: 0 0 14px; }
+
+.plan-steps { margin: 6px 0 0; padding-left: 4ch; }
+
+.report { margin-top: 10px; }
+
+.report .body {
+  margin: 6px 0 14px;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px dashed var(--fg-faint);
+  padding: 10px 12px;
+}
+
+.sources {
+  margin: 6px 0 14px;
+  padding-left: 4ch;
+  overflow-wrap: anywhere;
+}
+
+.sources a { color: var(--fg); }
+
 @media (max-width: 720px) {
   .chat-layout { grid-template-columns: 1fr; }
   .chat-side {

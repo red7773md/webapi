@@ -34,9 +34,9 @@ Risk accepted by Emdad: unofficial endpoints can break, and the account used
 | Step | What | State |
 |---|---|---|
 | 1 | Admin login, cookie import, verify uplink, terminal UI, Vercel-ready storage | **done and live** (2026-10-13): private Blob store, cookies saved, uplink verified on the deployed site, 3 models listed. 42 tests pass |
-| 2 | Chat module (multi-turn, file attachments, history) | built and tested: local tests (56), browser smoke test. Live check pending deploy |
-| 3 | Image generation module | built and tested: local tests (67), browser smoke test. Live check pending deploy |
-| 4 | Deep research module (background jobs, polling, report view) | not started |
+| 2 | Chat module (multi-turn, file attachments, history) | built and tested: local tests, browser smoke test. Live check pending deploy |
+| 3 | Image generation module | built and tested: local tests, browser smoke test. Live check pending deploy |
+| 4 | Deep research module (plan, confirm, short polls, report view) | built and tested: 79 local tests in total, browser smoke test (plan, start, poll to report, source link, delete). Live check pending deploy |
 | — | ChatGPT client (unofficial, cookie-based) | not started |
 
 Step 1 commits: `6ca6eb4` (app), `7e18c36` (Vercel-ready storage), `48c6040`
@@ -63,12 +63,15 @@ app/
   records.py              JsonStore (records and index lists), FeatureError, error handlers
   chat_service.py         ChatService: multi-turn sends, attachments, history in chats/
   image_service.py        ImageService: generate, keep bytes in images/, serve, delete
-  feature_routes.py       routers for /api/chat and /api/image (admin only)
+  research_service.py     ResearchService: plan (saved), start (saved, 45 s cap), short
+                          polls of the chat until the report is ready; jobs in research/
+  feature_routes.py       routers for /api/chat, /api/image and /api/research (admin only)
 static/                   index.html, style.css, app.js (no build step, textContent only)
 tests/test_step1.py       37 tests; fake Gemini client and in-memory Blob HTTP
 tests/test_storage_errors.py  5 tests; Blob refusals and network failures
 tests/test_chat.py       14 tests; chat sends, attachments, errors, shared history
 tests/test_images.py    11 tests; prompts, stored bytes, admin-only serving, errors
+tests/test_research.py  12 tests; plan, start, polling, failed start, retry, 90-min limit
 ```
 
 Key decisions:
@@ -151,9 +154,16 @@ set -a; . ./.env; set +a
   after a few days, that is the first thing to check.
 - Chromium-based browsers issue device-bound cookies that can expire within hours.
   Firefox cookies last longer. This is in the README and the UI hint.
-- Deep research runs for 5–10 minutes, which is longer than the 60 s function
-  limit. Step 4 must start the job, store its ID, and poll with short requests.
-  Do not wait inside one request.
+- Deep research runs for 5–10 minutes, longer than the 60 s function limit. Step 4
+  handles it by saving the job after each step and polling with one short chat read
+  per request (the page polls every 6 s while the screen is open). Nothing waits
+  inside one request.
+- A research job is marked failed after 90 minutes without a report. If the browser
+  is closed, the job is still on the server; reopen the RESEARCH screen to see it.
+- A research start that times out (45 s) may still have started at Gemini. The job
+  shows failed with that note; check the Gemini app before pressing RETRY START.
+- Research reports come from the chat's latest deep research document. If the chat
+  is changed in the Gemini app, the report can be missed.
 - Chat keeps no attachment files, only names and sizes. Gemini's own history is not
   deleted when a chat is deleted here.
 - A chat send that takes over 50 s returns 504. Gemini may still have the message, so
@@ -163,8 +173,9 @@ set -a; . ./.env; set +a
 - Image generation waits up to 45 s for Gemini, then 504. Gemini may still produce the
   image. It is not saved in that case.
 - Images come only from generate_content. Images in chat replies are not saved yet.
-- Deep research calls have not been tried live yet. Only the verify path
-  (login plus model listing) has run live.
+- Chat, image and deep research calls have not been tried live yet. Only the verify
+  path (login plus model listing) has run live. Browser smoke tests used a fake
+  Gemini client.
 - The sandbox cannot reach Google, so live Gemini calls are tested only on the site.
 
 ## Next steps (in order)
@@ -174,8 +185,10 @@ set -a; . ./.env; set +a
    metadata in Blob, not in memory. Verify with a live test on the deployed site.
 2. (Done) Step 3, image generation: `POST /api/image/generate` returns the image(s),
    saved to Blob, with a URL in the UI.
-3. Step 4, deep research: start job → store `{cid, research_id, status}` → poll
-   endpoint → fetch report. Keep each request well under 60 s.
+3. (Done) Step 4, deep research: `POST /api/research` makes the plan (saved),
+   `POST /api/research/{id}/start` confirms it, `GET /api/research/{id}` is one short
+   poll that returns the report when Gemini has it. RESEARCH screen in the UI.
+   Verify with a live run on the deployed site (it takes 5–10 minutes).
 4. Then decide on the ChatGPT client (look at re-gpt first; check it is maintained).
 
 ## Working conventions
