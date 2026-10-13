@@ -16,9 +16,18 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from gemini_webapi import DeepResearchPlan
+from gemini_webapi import (
+    APIError,
+    DeepResearchPlan,
+    GeminiError,
+    ModelInvalidError,
+    TemporarilyBlockedError,
+    UsageLimitExceededError,
+)
+from gemini_webapi import TimeoutError as GeminiTimeoutError
 
 from .cookie_store import utc_now
+from .gemini_plan import read_saved_plan
 from .gemini_service import GeminiNotReady, GeminiService, describe_failure
 from .records import FeatureError, JsonStore, new_id
 
@@ -26,10 +35,20 @@ log = logging.getLogger("gemini_webui")
 
 RESEARCH_INDEX = "research/index.json"
 MAX_PROMPT_CHARS = 1000
-# Gemini can take minutes to write a plan or confirm a start, so the request waits for
-# its reply. This must stay under the function limit in vercel.json (300 s), with room
-# for the client's connection step (up to 45 s) and saving the job.
+# Gemini can take minutes to write a plan. The live stream gets PLAN_STREAM_SECONDS. If
+# the stream ends without a plan, the saved chat is read until PLAN_TIMEOUT_SECONDS
+# from the start of planning. Both stay under the function limit in vercel.json (300 s),
+# with room for connecting (up to 45 s) and saving the job.
+PLAN_STREAM_SECONDS = 150.0
 PLAN_TIMEOUT_SECONDS = 240.0
+PLAN_POLL_SECONDS = 10.0  # pause between saved-chat reads
+# Errors that re-reading the chat cannot fix, so the saved chat is not checked for them
+_NO_RECOVERY = (
+    GeminiTimeoutError,
+    UsageLimitExceededError,
+    ModelInvalidError,
+    TemporarilyBlockedError,
+)
 START_TIMEOUT_SECONDS = 240.0
 POLL_TIMEOUT_SECONDS = 30.0  # one chat read
 STARTING_STALE_SECONDS = 120  # a "starting" job this old was interrupted and may be retried
@@ -112,10 +131,7 @@ class ResearchService:
         started = time.monotonic()
         try:
             with _logged_stream(client):
-                plan = await asyncio.wait_for(
-                    client.create_deep_research_plan(prompt, model=model or None),
-                    PLAN_TIMEOUT_SECONDS,
-                )
+                plan = await self._make_plan(client, prompt, model, started)
         except Exception as exc:
             log.warning("research plan failed after %.0f s: %s", time.monotonic() - started, exc)
             raise
@@ -217,6 +233,74 @@ class ResearchService:
         job["updated_at"] = now
         await self._save(job)
         return job
+
+    async def _make_plan(
+        self, client: Any, prompt: str, model: str | None, started: float
+    ) -> DeepResearchPlan:
+        """Ask Gemini for a plan. If the live stream ends without one, read the saved chat.
+
+        The chat is created here, not inside the library, so its id is known even when
+        the stream is cut. Gemini finishes the planning turn on its side either way.
+        """
+        chat = client.start_chat(model=model or None)
+        try:
+            return await asyncio.wait_for(
+                client.create_deep_research_plan(prompt, chat=chat),
+                PLAN_STREAM_SECONDS,
+            )
+        except (asyncio.TimeoutError, GeminiError, APIError) as exc:
+            if not chat.cid or isinstance(exc, _NO_RECOVERY):
+                raise
+            log.warning(
+                "research plan not in the live stream after %.0f s (%s); reading the saved chat",
+                time.monotonic() - started,
+                exc,
+            )
+        return await self._plan_from_saved_chat(client, chat, started)
+
+    async def _plan_from_saved_chat(
+        self, client: Any, chat: Any, started: float
+    ) -> DeepResearchPlan:
+        deadline = started + PLAN_TIMEOUT_SECONDS
+        reads = 0
+        while True:
+            reads += 1
+            remaining = deadline - time.monotonic()
+            saved = None
+            if remaining > 0:
+                try:
+                    saved = await asyncio.wait_for(
+                        read_saved_plan(client, chat.cid),
+                        min(POLL_TIMEOUT_SECONDS, remaining),
+                    )
+                except (asyncio.TimeoutError, APIError):
+                    log.debug("saved chat read %d did not finish", reads, exc_info=True)
+            if saved is not None:
+                # Keep the chat's ids as the library would have set them, so the
+                # confirmation continues this same turn.
+                if saved.rid:
+                    chat.rid = saved.rid
+                if saved.rcid:
+                    chat.rcid = saved.rcid
+                plan = saved.plan
+                plan.cid = chat.cid
+                plan.metadata = list(chat.metadata)
+                log.warning(
+                    "research plan read from the saved chat after %.0f s (%d reads)",
+                    time.monotonic() - started,
+                    reads,
+                )
+                return plan
+            if deadline - time.monotonic() <= PLAN_POLL_SECONDS:
+                log.warning(
+                    "no research plan in the saved chat after %.0f s (%d reads)",
+                    time.monotonic() - started,
+                    reads,
+                )
+                raise FeatureError(
+                    504, "Gemini did not finish the research plan in time. Try again in a moment."
+                )
+            await asyncio.sleep(PLAN_POLL_SECONDS)
 
     async def _fail(self, job: dict[str, Any], message: str) -> dict[str, Any]:
         job["status"] = "failed"

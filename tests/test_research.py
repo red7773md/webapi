@@ -13,8 +13,11 @@ import pytest
 from fastapi.testclient import TestClient
 from gemini_webapi import Citation, DeepResearchDocument, DeepResearchPlan, GeminiError
 
+from gemini_webapi import TimeoutError as GeminiTimeoutError
+
 from app import gemini_service, research_service
 from app.config import Settings
+from app.gemini_plan import SavedPlan
 from app.main import create_app
 
 ADMIN_USER = "admin"
@@ -51,6 +54,7 @@ class Backend:
         self.init_calls: list[dict] = []  # every connect, so tests can read the budget
         self.verbose_seen: list[tuple[str, bool]] = []  # verbose flag seen by each call
         self.start_chats: list[dict] = []  # the chat each confirmation continued
+        self.stream_cid = ""  # the chat id the stream delivers before a plan error, if any
 
 
 class FakeOutput:
@@ -88,6 +92,8 @@ class FakeClient:
         if self._backend.plan_delay:
             await asyncio.sleep(self._backend.plan_delay)
         if self._backend.plan_error is not None:
+            if chat is not None and self._backend.stream_cid:
+                chat.cid = self._backend.stream_cid  # the chat id arrived before the stream was cut
             raise self._backend.plan_error
         self._backend.plans.append(prompt)
         return DeepResearchPlan(
@@ -295,10 +301,75 @@ def test_a_failed_plan_is_a_plain_502(env):
 
 def test_a_slow_plan_gives_a_504(env, monkeypatch):
     client, backend, _ = env
-    monkeypatch.setattr(research_service, "PLAN_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(research_service, "PLAN_STREAM_SECONDS", 0.05)
     backend.plan_delay = 1.0
     resp = client.post("/api/research", json={"prompt": "slow topic"})
     assert resp.status_code == 504
+
+
+def saved_plan_reader(empty_reads: int, calls: list[str]):
+    """Stands in for reading the saved chat: no plan for the first reads, then one."""
+
+    async def read(client, cid, limit=10):
+        calls.append(cid)
+        if len(calls) <= empty_reads:
+            return None
+        return SavedPlan(
+            plan=DeepResearchPlan(
+                title="Recovered plan", steps=["Survey sources"], eta_text="about 8 minutes"
+            ),
+            rid="r_saved",
+            rcid="rc_saved",
+        )
+
+    return read
+
+
+def test_a_plan_the_stream_loses_is_read_from_the_saved_chat(env, monkeypatch):
+    client, backend, _ = env
+    backend.plan_error = GeminiError("Gemini did not return a deep research plan.")
+    backend.stream_cid = "c_saved"
+    calls: list[str] = []
+    monkeypatch.setattr(research_service, "PLAN_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(research_service, "read_saved_plan", saved_plan_reader(2, calls))
+
+    resp = client.post("/api/research", json={"prompt": "Indian economy"})
+    assert resp.status_code == 200, resp.text
+    job_id = resp.json()["id"]
+    record = client.get(f"/api/research/{job_id}").json()
+    assert record["title"] == "Recovered plan"
+    assert record["plan"]["cid"] == "c_saved"
+    assert calls == ["c_saved", "c_saved", "c_saved"]  # two empty reads, then the plan
+
+    assert client.post(f"/api/research/{job_id}/start").status_code == 200
+    assert backend.start_chats[-1]["cid"] == "c_saved"
+
+
+def test_a_saved_chat_with_no_plan_gives_a_504_within_the_budget(env, monkeypatch):
+    client, backend, _ = env
+    backend.plan_error = GeminiError("Gemini did not return a deep research plan.")
+    backend.stream_cid = "c_saved"
+    calls: list[str] = []
+    monkeypatch.setattr(research_service, "PLAN_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(research_service, "PLAN_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(research_service, "read_saved_plan", saved_plan_reader(10**6, calls))
+
+    resp = client.post("/api/research", json={"prompt": "anything"})
+    assert resp.status_code == 504
+    assert "did not finish the research plan" in resp.json()["detail"]
+    assert len(calls) > 1
+    assert client.get("/api/research").json()["jobs"] == []
+
+
+def test_a_timeout_from_gemini_is_not_read_from_the_saved_chat(env, monkeypatch):
+    client, backend, _ = env
+    backend.plan_error = GeminiTimeoutError("Gemini timed out.")
+    backend.stream_cid = "c_saved"
+    calls: list[str] = []
+    monkeypatch.setattr(research_service, "read_saved_plan", saved_plan_reader(0, calls))
+
+    assert client.post("/api/research", json={"prompt": "anything"}).status_code == 504
+    assert calls == []
 
 
 def test_research_running_past_the_limit_is_marked_failed(env, monkeypatch):

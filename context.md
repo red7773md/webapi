@@ -36,7 +36,7 @@ Risk accepted by Emdad: unofficial endpoints can break, and the account used
 | 1 | Admin login, cookie import, verify uplink, terminal UI, Vercel-ready storage | **done and live** (2026-10-13): private Blob store, cookies saved, uplink verified on the deployed site, 3 models listed. 42 tests pass |
 | 2 | Chat module (multi-turn, file attachments, history) | built and tested: local tests, browser smoke test. Live check pending deploy |
 | 3 | Image generation module | built and tested: local tests, browser smoke test. Live check pending deploy |
-| 4 | Deep research module (plan, confirm, short polls, report view) | built and tested: 79 local tests in total, browser smoke test (plan, start, poll to report, source link, delete). Live check pending deploy |
+| 4 | Deep research module (plan, confirm, short polls, report view) | built and tested: 93 local tests in total, browser smoke test (plan, start, poll to report, source link, delete). Plan recovery from the saved chat added; live check pending deploy |
 | — | ChatGPT client (unofficial, cookie-based) | not started |
 
 Step 1 commits: `6ca6eb4` (app), `7e18c36` (Vercel-ready storage), `48c6040`
@@ -63,15 +63,18 @@ app/
   records.py              JsonStore (records and index lists), FeatureError, error handlers
   chat_service.py         ChatService: multi-turn sends, attachments, history in chats/
   image_service.py        ImageService: generate, keep bytes in images/, serve, delete
-  research_service.py     ResearchService: plan (saved), start (saved, 45 s cap), short
+  research_service.py     ResearchService: plan (saved), start (saved, 240 s cap), short
                           polls of the chat until the report is ready; jobs in research/
+  gemini_plan.py          reads a plan back from the saved chat when the live stream lost it
   feature_routes.py       routers for /api/chat, /api/image and /api/research (admin only)
 static/                   index.html, style.css, app.js (no build step, textContent only)
 tests/test_step1.py       37 tests; fake Gemini client and in-memory Blob HTTP
 tests/test_storage_errors.py  5 tests; Blob refusals and network failures
 tests/test_chat.py       14 tests; chat sends, attachments, errors, shared history
 tests/test_images.py    11 tests; prompts, stored bytes, admin-only serving, errors
-tests/test_research.py  12 tests; plan, start, polling, failed start, retry, 90-min limit
+tests/test_research.py  19 tests; plan, start, polling, failed start, retry, 90-min limit,
+                          plan recovered from the saved chat, saved chat without a plan
+tests/test_gemini_plan.py  7 tests; saved turns parsed, plan found, RPC payload, log line
 ```
 
 Key decisions:
@@ -155,7 +158,10 @@ set -a; . ./.env; set +a
 - Chromium-based browsers issue device-bound cookies that can expire within hours.
   Firefox cookies last longer. This is in the README and the UI hint.
 - Deep research runs for 5–10 minutes. Planning and starting wait for Gemini's reply
-  inside the request, up to 240 s each, because Gemini needs time to write the plan.
+  inside the request, because Gemini needs time to write the plan. Planning: the live
+  stream gets 150 s. If it ends without a plan, the saved chat is read every 10 s until
+  240 s from the start of planning (`PLAN_STREAM_SECONDS`, `PLAN_TIMEOUT_SECONDS`).
+  Starting: up to 240 s.
   That needs `maxDuration` 300 in vercel.json. If Vercel refuses the setting for this
   plan, the build fails; then lower the caps in research_service.py. The run itself
   is polled with short requests (one chat read each, page checks every 6 s).
@@ -163,8 +169,9 @@ set -a; . ./.env; set +a
   is closed, the job is still on the server; reopen the RESEARCH screen to see it.
 - A research start that times out (240 s) may still have started at Gemini. The job
   shows failed with that note; check the Gemini app before pressing RETRY START.
-- A plan that times out (240 s) is lost. The plan chat may exist in Gemini, but this
-  app does not know its ID, so retry from the topic.
+- The chat ID is known even when the stream is cut, so the plan can be read from the
+  saved chat. If no plan appears within 240 s, the request returns 504 and nothing is
+  saved; retry from the topic.
 - Plan and start calls run with the library's verbose log on. Vercel logs show
   `research plan failed after N s` with the error, plus the HTTP status and whether the
   full reply arrived. Use these lines to find where a research request stops.
@@ -173,9 +180,15 @@ set -a; . ./.env; set +a
 - gemini-webapi stays pinned at 2.1.1, the newest PyPI release. Upstream main has two
   later commits (1 Oct, 8 Oct) for cookie drift and retries on network errors. They
   change the login path, which works now, so they are not taken yet.
-- Open: Google ends the plan's reply after about 66 to 81 seconds, before the plan
-  arrives (four runs). The upstream CLI test decides whether this is specific to our
-  deploy or to the account or network.
+- The live plan stream is cut after about 60 to 80 seconds (four runs on Vercel). The
+  Windows CLI run (same account) shows Gemini still finishes the plan turn on its side:
+  the chat read reported it finalized about 98 seconds after the start. The library's
+  chat read drops the plan, so the app reads the saved turn itself (`gemini_plan.py`).
+  Not yet confirmed live. The logs show `read the plan from the saved chat` on success,
+  or `saved chat has no plan yet: …` with the newest turn's state on each empty read.
+- The recovered plan's confirmation continues the chat with the saved reply IDs. The
+  stream's extra context field may be missing from that chat, which could make
+  Gemini reject the start. Not yet confirmed live.
 - Research reports come from the chat's latest deep research document. If the chat
   is changed in the Gemini app, the report can be missed.
 - Chat keeps no attachment files, only names and sizes. Gemini's own history is not
