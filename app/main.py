@@ -18,7 +18,10 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .config import BASE_DIR, Settings, load_settings
 from .cookie_store import CookieStore, parse_cookie_text
+from .chat_service import ChatService
+from .feature_routes import chat_router
 from .gemini_service import GeminiService
+from .records import JsonStore, register_error_handlers
 from .security import LoginThrottle, credentials_match
 from .storage import BlobStore, KeyValueStore, LocalFileStore, StorageError
 
@@ -68,6 +71,8 @@ def create_app(
     if store is None:
         store = BlobStore(settings.blob_token) if settings.blob_token else LocalFileStore(settings.data_dir)
     service = GeminiService(CookieStore(store), factory=gemini_factory, storage_label=settings.storage_label)
+    records = JsonStore(store)
+    chats = ChatService(service, records)
     throttle = LoginThrottle()
 
     @asynccontextmanager
@@ -179,6 +184,12 @@ def create_app(
     @app.exception_handler(StorageError)
     async def storage_unavailable(_: Request, exc: StorageError) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    register_error_handlers(app)
+
+    # ----- chat (multi-turn, attachments, history) --------------------------
+
+    app.include_router(chat_router(chats), dependencies=[admin])
 
     app.state.gemini = service
     return app

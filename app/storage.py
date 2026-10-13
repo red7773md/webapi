@@ -37,7 +37,7 @@ class StorageError(RuntimeError):
 class KeyValueStore(Protocol):
     async def read(self, name: str) -> bytes | None: ...
 
-    async def write(self, name: str, data: bytes) -> None: ...
+    async def write(self, name: str, data: bytes, content_type: str = "application/json") -> None: ...
 
     async def delete(self, name: str) -> None: ...
 
@@ -54,10 +54,11 @@ class LocalFileStore:
             return None
         return path.read_bytes()
 
-    async def write(self, name: str, data: bytes) -> None:
+    async def write(self, name: str, data: bytes, content_type: str = "application/json") -> None:
         self._root.mkdir(parents=True, exist_ok=True)
         os.chmod(self._root, 0o700)
         path = self._root / name
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)  # names may include folders, e.g. chats/
         tmp = path.with_name(path.name + ".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as fh:
@@ -151,11 +152,11 @@ class BlobStore:
             raise _rejected("read", resp)
         return resp.content
 
-    async def write(self, name: str, data: bytes) -> None:
+    async def write(self, name: str, data: bytes, content_type: str = "application/json") -> None:
         headers = {
             **self._auth_headers(),
-            "content-type": "application/json",
-            "x-content-type": "application/json",
+            "content-type": content_type,
+            "x-content-type": content_type,
             "x-vercel-blob-access": "private",
             "x-add-random-suffix": "0",
             "x-allow-overwrite": "1",

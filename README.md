@@ -14,7 +14,7 @@ See `context.md` for the full project context, decisions and next steps.
 ## Status
 
 - [x] Step 1: admin login, cookie import, uplink verification, terminal UI, Vercel-ready storage
-- [ ] Step 2: chat (multi-turn, file attachments, history)
+- [x] Step 2: chat (multi-turn, file attachments, history)
 - [ ] Step 3: image generation
 - [ ] Step 4: deep research
 

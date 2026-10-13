@@ -62,7 +62,7 @@ async def _close_quietly(client: Any) -> None:
         log.debug("client close failed", exc_info=True)
 
 
-def _describe_failure(exc: Exception) -> str:
+def describe_failure(exc: Exception) -> str:
     if isinstance(exc, AuthError):
         return "Google rejected these cookies. Copy fresh values from a logged-in browser session."
     if isinstance(exc, GeminiTimeoutError):
@@ -166,7 +166,7 @@ class GeminiService:
             except Exception as exc:
                 if not isinstance(exc, (AuthError, GeminiError)):
                     log.exception("Gemini verification failed")
-                error = _describe_failure(exc)
+                error = describe_failure(exc)
 
             if error is None:
                 self._client = client
@@ -195,7 +195,7 @@ class GeminiService:
                 await client.init(timeout=VERIFY_TIMEOUT_SECONDS, auto_refresh=True)
             except Exception as exc:
                 await _close_quietly(client)
-                raise GeminiNotReady(_describe_failure(exc)) from exc
+                raise GeminiNotReady(describe_failure(exc)) from exc
             self._client = client
             self._client_loop = loop
             return client

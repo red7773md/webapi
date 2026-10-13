@@ -34,7 +34,7 @@ Risk accepted by Emdad: unofficial endpoints can break, and the account used
 | Step | What | State |
 |---|---|---|
 | 1 | Admin login, cookie import, verify uplink, terminal UI, Vercel-ready storage | **done and live** (2026-10-13): private Blob store, cookies saved, uplink verified on the deployed site, 3 models listed. 42 tests pass |
-| 2 | Chat module (multi-turn, file attachments, history) | not started |
+| 2 | Chat module (multi-turn, file attachments, history) | built and tested: local tests (56), browser smoke test. Live check pending deploy |
 | 3 | Image generation module | not started |
 | 4 | Deep research module (background jobs, polling, report view) | not started |
 | — | ChatGPT client (unofficial, cookie-based) | not started |
@@ -60,9 +60,13 @@ app/
                           StorageError carries Vercel's reason, never the token
   cookie_store.py         cookie parsing/masking; CookieRecord (cookies + verification state)
   gemini_service.py       GeminiService: verify, status, require_client (per event loop)
+  records.py              JsonStore (records and index lists), FeatureError, error handlers
+  chat_service.py         ChatService: multi-turn sends, attachments, history in chats/
+  feature_routes.py       routers for /api/chat (admin only)
 static/                   index.html, style.css, app.js (no build step, textContent only)
 tests/test_step1.py       37 tests; fake Gemini client and in-memory Blob HTTP
 tests/test_storage_errors.py  5 tests; Blob refusals and network failures
+tests/test_chat.py       14 tests; chat sends, attachments, errors, shared history
 ```
 
 Key decisions:
@@ -148,7 +152,13 @@ set -a; . ./.env; set +a
 - Deep research runs for 5–10 minutes, which is longer than the 60 s function
   limit. Step 4 must start the job, store its ID, and poll with short requests.
   Do not wait inside one request.
-- Chat, image and deep research calls have not been tried yet. Only the verify path
+- Chat keeps no attachment files, only names and sizes. Gemini's own history is not
+  deleted when a chat is deleted here.
+- A chat send that takes over 50 s returns 504. Gemini may still have the message, so
+  the saved chat can miss that turn. Re-check the Gemini app if it happens.
+- Index lists (chats/index.json) are read, changed and written back. Two sends at the
+  same moment can lose one entry. Fine for one admin.
+- Image and deep research calls have not been tried live yet. Only the verify path
   (login plus model listing) has run live.
 - The sandbox cannot reach Google, so live Gemini calls are tested only on the site.
 
