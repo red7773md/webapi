@@ -1,0 +1,282 @@
+/* GEMINI // ARCHIVE TERMINAL
+   Phosphor-green-on-black, scanlines, a faint vignette and a blinking cursor.
+   The theme is always on; there is no light mode. */
+
+:root {
+  --bg: #030603;
+  --panel: #061006;
+  --fg: #8dff9b;
+  --fg-dim: #3c7a47;
+  --fg-faint: #1d3d24;
+  --amber: #ffb84d;
+  --alert: #ff6b5b;
+  --glow: 0 0 6px rgba(141, 255, 155, 0.55);
+  --font: "VT323", "Courier New", ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+body {
+  font-family: var(--font);
+  font-size: clamp(19px, 2.3vw, 23px);
+  line-height: 1.25;
+  text-shadow: var(--glow);
+  -webkit-font-smoothing: none;
+}
+
+::selection { background: var(--fg); color: var(--bg); }
+
+/* ----- CRT overlay ------------------------------------------------------- */
+
+.crt {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+  background:
+    radial-gradient(ellipse at center, transparent 58%, rgba(0, 0, 0, 0.78) 100%),
+    repeating-linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0) 0,
+      rgba(0, 0, 0, 0) 2px,
+      rgba(0, 0, 0, 0.27) 3px,
+      rgba(0, 0, 0, 0) 4px
+    );
+  animation: flicker 6s infinite steps(1, end);
+}
+
+@keyframes flicker {
+  0%, 92%, 100% { opacity: 1; }
+  93% { opacity: 0.93; }
+  95% { opacity: 0.98; }
+}
+
+/* ----- layout ------------------------------------------------------------ */
+
+.term {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 18px 16px 72px;
+}
+
+.frame {
+  position: relative;
+  border: 1px solid var(--fg-dim);
+  background: var(--panel);
+  padding: 14px 18px 16px;
+  margin: 0 0 16px;
+  box-shadow: inset 0 0 28px rgba(141, 255, 155, 0.05), 0 0 16px rgba(141, 255, 155, 0.06);
+}
+
+.head { padding: 10px 16px; }
+
+.head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.brand {
+  color: var(--amber);
+  letter-spacing: 0.12em;
+  text-shadow: 0 0 6px rgba(255, 184, 77, 0.5);
+}
+
+.rec { color: var(--alert); animation: blink 1.4s steps(1, end) infinite; }
+
+.clock { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+
+.dim { color: var(--fg-dim); }
+.ok { color: var(--fg); }
+.warn { color: var(--amber); }
+.bad { color: var(--alert); }
+
+.panel-title {
+  margin: 0 0 12px;
+  font-weight: normal;
+  font-size: 1.15em;
+  color: var(--amber);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.panel-title::before { content: "> "; color: var(--fg-dim); }
+
+p { margin: 0 0 10px; max-width: 68ch; }
+
+/* ----- nav --------------------------------------------------------------- */
+
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--fg-faint);
+}
+
+.nav a {
+  color: var(--fg-dim);
+  text-decoration: none;
+  padding: 0 6px;
+  border: 1px solid transparent;
+}
+
+.nav a:hover,
+.nav a:focus-visible {
+  color: var(--fg);
+  border-color: var(--fg-dim);
+  outline: none;
+}
+
+.nav a[aria-current="page"] {
+  color: var(--bg);
+  background: var(--fg);
+  text-shadow: none;
+}
+
+.nav .btn { margin-left: auto; }
+
+/* ----- controls ---------------------------------------------------------- */
+
+.btn {
+  font: inherit;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--fg-dim);
+  padding: 1px 12px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.btn:hover:not(:disabled),
+.btn:focus-visible {
+  background: var(--fg);
+  color: var(--bg);
+  text-shadow: none;
+  outline: none;
+}
+
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn.danger { color: var(--alert); border-color: #7a3a33; }
+.btn.danger:hover:not(:disabled),
+.btn.danger:focus-visible { background: var(--alert); color: var(--bg); }
+
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 6px 0 16px; }
+
+.field {
+  font: inherit;
+  color: var(--fg);
+  background: transparent;
+  border: none;
+  border-bottom: 1px dashed var(--fg-dim);
+  padding: 2px 4px;
+  width: 100%;
+  caret-color: var(--fg);
+}
+
+.field:focus {
+  outline: none;
+  border-bottom-color: var(--fg);
+  background: rgba(141, 255, 155, 0.04);
+}
+
+textarea.field {
+  border: 1px dashed var(--fg-dim);
+  padding: 8px;
+  min-height: 130px;
+  resize: vertical;
+  line-height: 1.2;
+}
+
+textarea.field:focus { border-color: var(--fg); }
+
+.row {
+  display: grid;
+  grid-template-columns: 12ch 1fr;
+  gap: 4px 12px;
+  align-items: baseline;
+  margin: 0 0 10px;
+}
+
+.row label { color: var(--fg-dim); }
+
+.kv {
+  display: grid;
+  grid-template-columns: 12ch 1fr;
+  gap: 2px 12px;
+  margin: 0 0 16px;
+  word-break: break-word;
+}
+
+.kv .k { color: var(--fg-dim); }
+
+.log {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px dashed var(--fg-faint);
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow: auto;
+  font: inherit;
+}
+
+.hint {
+  color: var(--fg-dim);
+  font-size: 0.92em;
+  margin: 0 0 12px;
+}
+
+.hint code {
+  color: var(--amber);
+  text-shadow: none;
+}
+
+/* ----- login ------------------------------------------------------------- */
+
+.boot {
+  margin: 0 0 18px;
+  color: var(--fg-dim);
+  white-space: pre-wrap;
+  font: inherit;
+}
+
+.login { max-width: 460px; }
+
+.login .status { min-height: 1.3em; margin-top: 8px; }
+
+.login-form .btn { margin-top: 8px; }
+
+/* ----- cursor & animation ------------------------------------------------ */
+
+.cursor::after {
+  content: "█";
+  margin-left: 4px;
+  animation: blink 1s steps(1, end) infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crt,
+  .rec,
+  .cursor::after { animation: none; }
+}
+
+@media (max-width: 560px) {
+  .row, .kv { grid-template-columns: 1fr; }
+  .row label, .kv .k { color: var(--amber); }
+}
