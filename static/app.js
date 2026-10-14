@@ -906,6 +906,18 @@
       setNotice(err.message, "bad");
     };
 
+    // Shows in the tab title when the plan lands, so it is seen from another tab.
+    // The title goes back to normal when the window is focused again.
+    const flagPlanReady = () => {
+      const base = document.title.replace(/^PLAN READY \/\/ /, "");
+      document.title = `PLAN READY // ${base}`;
+      const restore = () => {
+        document.title = base;
+        window.removeEventListener("focus", restore);
+      };
+      window.addEventListener("focus", restore);
+    };
+
     const drawList = () => {
       if (!jobs.length) {
         listBox.replaceChildren(el("li", { class: "dim", text: "no research yet" }));
@@ -979,7 +991,9 @@
       const statusText =
         job.status === "running" && job.started_at
           ? `${RESEARCH_STATUS.running} for ${elapsed(job.started_at)}`
-          : RESEARCH_STATUS[job.status] || job.status;
+          : job.status === "planning"
+            ? `${RESEARCH_STATUS.planning} for ${elapsed(job.created_at)}`
+            : RESEARCH_STATUS[job.status] || job.status;
       const cls = job.status === "failed" ? "bad" : job.status === "done" ? "ok" : "warn";
       detail.replaceChildren(
         el("h3", { class: "sub", text: job.title || job.prompt }),
@@ -1032,13 +1046,17 @@
         const job = await api(`/api/research/${id}`);
         if (!alive || currentId !== id) return;
         retries = 0;
+        if (job.status === "planning") planWatch = id;
         drawJob(job);
         if (job.status === "running" || job.status === "planning") schedulePoll(id);
         else await loadList();
-        if (job.status === "planned" && planWatch === id) {
-          setNotice("plan ready. start the research when you are happy with it.", "ok");
+        if (job.status !== "planning" && planWatch === id) {
+          planWatch = null;
+          if (job.status === "planned") {
+            setNotice("plan ready. read it, then press START RESEARCH.", "ok");
+            flagPlanReady();
+          }
         }
-        if (job.status !== "planning" && planWatch === id) planWatch = null;
       } catch (err) {
         if (isAuthError(err)) return fail(err);
         const transient = err.status >= 500;
@@ -1061,6 +1079,7 @@
         const job = await api(`/api/research/${id}`);
         drawJob(job);
         setNotice("", "");
+        if (job.status === "planning") planWatch = id;
         if (job.status === "running" || job.status === "planning") schedulePoll(id);
       } catch (err) {
         fail(err);
