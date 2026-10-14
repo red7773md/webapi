@@ -837,7 +837,9 @@
 
   // ----- RESEARCH module -----------------------------------------------------
 
-  const RESEARCH_POLL_MS = 6000;
+  // Each check can open a connection to Gemini, so the page checks slowly.
+  const RESEARCH_PLAN_POLL_MS = 20000;
+  const RESEARCH_POLL_MS = 60000;
   const RESEARCH_MAX_RETRIES = 5;
   const RESEARCH_STATUS = {
     planning: "WRITING THE PLAN on gemini",
@@ -1013,6 +1015,9 @@
           ? el("p", { class: "hint", text: "Gemini is researching. This page checks every few seconds. You can leave and come back." })
           : null,
         job.status === "failed" ? el("p", { class: "bad", text: job.error || "research failed." }) : null,
+        job.status !== "failed" && job.last_check_error
+          ? el("p", { class: "hint", text: `last check did not reach gemini (retrying more slowly): ${job.last_check_error}` })
+          : null,
         (job.status === "planned" || job.status === "failed") && job.plan
           ? el(
               "div",
@@ -1034,10 +1039,11 @@
       );
     };
 
-    const schedulePoll = (id) => {
+    const schedulePoll = (id, status = "running") => {
       clearTimeout(pollTimer);
       if (!alive) return;
-      pollTimer = setTimeout(() => pollJob(id), RESEARCH_POLL_MS);
+      const delay = status === "planning" ? RESEARCH_PLAN_POLL_MS : RESEARCH_POLL_MS;
+      pollTimer = setTimeout(() => pollJob(id), delay);
     };
 
     async function pollJob(id) {
@@ -1048,7 +1054,7 @@
         retries = 0;
         if (job.status === "planning") planWatch = id;
         drawJob(job);
-        if (job.status === "running" || job.status === "planning") schedulePoll(id);
+        if (job.status === "running" || job.status === "planning") schedulePoll(id, job.status);
         else await loadList();
         if (job.status !== "planning" && planWatch === id) {
           planWatch = null;
@@ -1080,7 +1086,7 @@
         drawJob(job);
         setNotice("", "");
         if (job.status === "planning") planWatch = id;
-        if (job.status === "running" || job.status === "planning") schedulePoll(id);
+        if (job.status === "running" || job.status === "planning") schedulePoll(id, job.status);
       } catch (err) {
         fail(err);
       } finally {
@@ -1117,7 +1123,7 @@
         if (job.status === "planning") {
           planWatch = job.id;
           setNotice("gemini is still writing the plan. this page checks every few seconds.", "dim");
-          schedulePoll(job.id);
+          schedulePoll(job.id, "planning");
         } else {
           setNotice("plan ready. start the research when you are happy with it.", "ok");
         }

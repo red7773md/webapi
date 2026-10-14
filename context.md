@@ -36,7 +36,7 @@ Risk accepted by Emdad: unofficial endpoints can break, and the account used
 | 1 | Admin login, cookie import, verify uplink, terminal UI, Vercel-ready storage | **done and live** (2026-10-13): private Blob store, cookies saved, uplink verified on the deployed site, 3 models listed. 42 tests pass |
 | 2 | Chat module (multi-turn, file attachments, history) | built and tested: local tests, browser smoke test. Live check pending deploy |
 | 3 | Image generation module | built and tested: local tests, browser smoke test. Live check pending deploy |
-| 4 | Deep research module (plan, confirm, short polls, report view) | built and tested: 96 local tests in total, browser smoke test (plan, start, poll to report, source link, delete). Plan recovery from the saved chat added; live check pending deploy |
+| 4 | Deep research module (plan, confirm, short polls, report view) | built and tested: 99 local tests in total, browser smoke test (plan, start, poll to report, source link, delete). Plan recovery from the saved chat added; live check pending deploy |
 | — | ChatGPT client (unofficial, cookie-based) | not started |
 
 Step 1 commits: `6ca6eb4` (app), `7e18c36` (Vercel-ready storage), `48c6040`
@@ -72,8 +72,9 @@ tests/test_step1.py       37 tests; fake Gemini client and in-memory Blob HTTP
 tests/test_storage_errors.py  5 tests; Blob refusals and network failures
 tests/test_chat.py       14 tests; chat sends, attachments, errors, shared history
 tests/test_images.py    11 tests; prompts, stored bytes, admin-only serving, errors
-tests/test_research.py  22 tests; plan, start, polling, failed start, retry, 90-min limit,
-                          plan recovered from the saved chat, saved chat without a plan
+tests/test_research.py  25 tests; plan, start, polling, failed start, retry, 90-min limit,
+                          plan recovered from the saved chat, saved chat without a plan,
+                          check gaps and back-off
 tests/test_gemini_plan.py  7 tests; saved turns parsed, plan found, RPC payload, log line
 ```
 
@@ -160,11 +161,20 @@ set -a; . ./.env; set +a
 - Deep research runs for 5–10 minutes. Planning and starting wait for Gemini's reply
   inside one request, capped at 150 s for the plan stream (`PLAN_STREAM_SECONDS`) and
   240 s for the start. If the plan stream ends without a plan, the job is saved as
-  `planning` and returned. The page then polls it every 6 s; each poll reads the saved
-  chat once, and the plan is adopted as soon as it appears. A plan still missing after
+  `planning` and returned. The page then polls it every 20 s; the server reads the saved
+  chat at most once per 20 s per job, and the plan is adopted as soon as it appears. A plan still missing after
   30 minutes (`PLAN_WAIT_SECONDS`) fails the job. The chat is read once more before that. Starting needs `maxDuration` 300 in
   vercel.json. If Vercel refuses the setting for this plan, the build fails; then lower
-  the caps in research_service.py. The run itself is polled the same way.
+  the caps in research_service.py. The run itself is polled the same way, at most once
+  per 60 s per job (`REPORT_CHECK_SECONDS`).
+- Request limits (to avoid being flagged for flooding). Gemini publishes no consumer
+  rate limit that we could find, so the server keeps its own count low. Per job: one
+  plan check per 20 s (about 75 over 25 minutes), one report check per 60 s. Requests
+  that the server asks for inside the gap get the stored job back with no Gemini call.
+  A failed check doubles the gap for that job (20 s, 40 s, 80 s ... capped at 600 s
+  via `MAX_CHECK_GAP_SECONDS`), and the failure is shown on the job as
+  `last_check_error`. A success resets the gap. Limits are per job, not global, so
+  many jobs at once would add up. Deep research also draws on the account's credit quota.
 - A research job is marked failed after 90 minutes without a report. If the browser
   is closed, the job is still on the server; reopen the RESEARCH screen to see it.
 - A research start that times out (240 s) may still have started at Gemini. The job

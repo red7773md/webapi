@@ -44,6 +44,11 @@ MAX_PROMPT_CHARS = 1000
 PLAN_STREAM_SECONDS = 150.0
 # A job whose plan has not appeared this long after it was made is given up.
 PLAN_WAIT_SECONDS = 30 * 60
+# Checks of Gemini are spaced out, so several tabs or API clients cannot make one job's
+# checks more frequent. A failed check doubles the gap, up to MAX_CHECK_GAP_SECONDS.
+PLAN_CHECK_SECONDS = 20.0
+REPORT_CHECK_SECONDS = 60.0
+MAX_CHECK_GAP_SECONDS = 600.0
 # Errors that re-reading the chat cannot fix, so a plan is not waited for after them
 _NO_RECOVERY = (
     GeminiTimeoutError,
@@ -55,6 +60,17 @@ START_TIMEOUT_SECONDS = 240.0
 POLL_TIMEOUT_SECONDS = 30.0  # one chat read
 STARTING_STALE_SECONDS = 120  # a "starting" job this old was interrupted and may be retried
 MAX_RUNNING_SECONDS = 90 * 60
+
+
+def _error_text(exc: Exception) -> str:
+    return str(exc) or type(exc).__name__
+
+
+def _check_is_due(job: dict[str, Any], gap: float) -> bool:
+    """Whether enough time has passed since the job's last check to ask Gemini again."""
+    failures = int(job.get("check_failures") or 0)
+    needed = min(gap * 2 ** min(failures, 10), MAX_CHECK_GAP_SECONDS)
+    return _seconds_since(job.get("checked_at")) >= needed
 
 
 def record_name(job_id: str) -> str:
@@ -239,6 +255,8 @@ class ResearchService:
             plan=plan.model_dump(mode="json"),
             started_at=now,
             checked_at=None,
+            check_failures=0,
+            last_check_error=None,
             updated_at=now,
         )
         await self._save(job)
@@ -253,17 +271,24 @@ class ResearchService:
 
         if _seconds_since(job["started_at"]) > MAX_RUNNING_SECONDS:
             return await self._fail(job, "Research did not finish within 90 minutes.")
+        if not _check_is_due(job, REPORT_CHECK_SECONDS):
+            return job  # checked recently; Gemini is not asked again yet
 
         plan = DeepResearchPlan.model_validate(job["plan"])
         cid = plan.cid or (plan.metadata[0] if plan.metadata else None)
         if not cid:
             return await self._fail(job, "The research has no chat id. It may not have started.")
 
-        client = await self._gemini.require_client()
-        output = await asyncio.wait_for(
-            client.fetch_latest_chat_response(cid, limit=10, match=_report_ready),
-            POLL_TIMEOUT_SECONDS,
-        )
+        try:
+            client = await self._gemini.require_client()
+            output = await asyncio.wait_for(
+                client.fetch_latest_chat_response(cid, limit=10, match=_report_ready),
+                POLL_TIMEOUT_SECONDS,
+            )
+        except (GeminiNotReady, asyncio.TimeoutError, GeminiError, APIError) as exc:
+            return await self._record_failure(job, exc)
+        job["check_failures"] = 0
+        job["last_check_error"] = None
         now = utc_now()
         job["checked_at"] = now
         if output is not None and _report_ready(output):
@@ -284,27 +309,33 @@ class ResearchService:
         The chat is read before the wait is judged. A job nobody polled for a long time
         still gets its plan if Gemini wrote one.
         """
-        chat = job["chat"]
-        client = await self._gemini.require_client()
-        try:
-            saved = await asyncio.wait_for(read_saved_plan(client, chat["cid"]), POLL_TIMEOUT_SECONDS)
-            chat["last_error"] = None
-        except (asyncio.TimeoutError, APIError) as exc:
-            saved = None
-            chat["last_error"] = str(exc) or type(exc).__name__
-            log.warning("saved chat read failed for job %s: %s", job["id"], chat["last_error"])
+        if not _check_is_due(job, PLAN_CHECK_SECONDS):
+            return job  # checked recently; Gemini is not asked again yet
 
-        now = utc_now()
-        job["checked_at"] = now
-        job["updated_at"] = now
+        chat = job["chat"]
+        saved = None
+        failure: Exception | None = None
+        try:
+            client = await self._gemini.require_client()
+            saved = await asyncio.wait_for(read_saved_plan(client, chat["cid"]), POLL_TIMEOUT_SECONDS)
+        except (GeminiNotReady, asyncio.TimeoutError, GeminiError, APIError) as exc:
+            failure = exc
+
         if saved is None:
             if _seconds_since(job["created_at"]) > PLAN_WAIT_SECONDS:
                 log.warning("no research plan after %d s; giving up on job %s", PLAN_WAIT_SECONDS, job["id"])
-                detail = f" Last check: {chat['last_error']}." if chat.get("last_error") else ""
+                detail = f" Last check: {_error_text(failure)}." if failure else ""
                 return await self._fail(
                     job,
                     f"Gemini did not finish the plan within 30 minutes. Try the topic again.{detail}",
                 )
+            if failure is not None:
+                return await self._record_failure(job, failure)
+            # Gemini answered and the plan is not there yet
+            job["check_failures"] = 0
+            job["last_check_error"] = None
+            job["checked_at"] = utc_now()
+            job["updated_at"] = job["checked_at"]
             await self._save(job)
             return job
 
@@ -325,6 +356,22 @@ class ResearchService:
             title=plan.title or job["prompt"][:80],
             plan=plan.model_dump(mode="json"),
             chat=None,
+        )
+        await self._save(job)
+        return job
+
+    async def _record_failure(self, job: dict[str, Any], exc: Exception) -> dict[str, Any]:
+        """A check Gemini could not answer. The next check waits twice as long."""
+        job["check_failures"] = int(job.get("check_failures") or 0) + 1
+        job["last_check_error"] = _error_text(exc)
+        now = utc_now()
+        job["checked_at"] = now
+        job["updated_at"] = now
+        log.warning(
+            "research check failed for job %s (%d in a row): %s",
+            job["id"],
+            job["check_failures"],
+            job["last_check_error"],
         )
         await self._save(job)
         return job

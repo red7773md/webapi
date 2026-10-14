@@ -160,7 +160,10 @@ def build(settings, backend, store):
 
 
 @pytest.fixture
-def env(settings):
+def env(settings, monkeypatch):
+    # Tests check Gemini on every poll unless a test sets a gap of its own
+    monkeypatch.setattr(research_service, "PLAN_CHECK_SECONDS", 0)
+    monkeypatch.setattr(research_service, "REPORT_CHECK_SECONDS", 0)
     backend, store = Backend(), MemoryStore()
     with TestClient(build(settings, backend, store)) as client:
         login(client)
@@ -428,6 +431,54 @@ def test_a_timeout_from_gemini_is_not_read_from_the_saved_chat(env, monkeypatch)
 
     assert client.post("/api/research", json={"prompt": "anything"}).status_code == 504
     assert calls == []
+
+
+def test_a_planning_job_is_not_asked_again_inside_the_gap(env, monkeypatch):
+    client, backend, _ = env
+    backend.plan_error = GeminiError("Gemini did not return a deep research plan.")
+    backend.stream_cid = "c_saved"
+    calls: list[str] = []
+    monkeypatch.setattr(research_service, "read_saved_plan", saved_plan_reader(10**6, calls))
+    monkeypatch.setattr(research_service, "PLAN_CHECK_SECONDS", 3600)
+    job_id = client.post("/api/research", json={"prompt": "anything"}).json()["id"]
+
+    assert client.get(f"/api/research/{job_id}").json()["status"] == "planning"
+    assert client.get(f"/api/research/{job_id}").json()["status"] == "planning"
+    assert calls == ["c_saved"]  # the second poll did not reach Gemini
+
+
+def test_a_failed_check_doubles_the_gap(env, monkeypatch):
+    client, backend, _ = env
+    backend.plan_error = GeminiError("Gemini did not return a deep research plan.")
+    backend.stream_cid = "c_saved"
+    calls: list[str] = []
+
+    async def refused(client, cid, limit=10):
+        calls.append(cid)
+        raise APIError("Batch execution failed with status code 429")
+
+    monkeypatch.setattr(research_service, "read_saved_plan", refused)
+    monkeypatch.setattr(research_service, "PLAN_CHECK_SECONDS", 3600)
+    job_id = client.post("/api/research", json={"prompt": "anything"}).json()["id"]
+
+    record = client.get(f"/api/research/{job_id}").json()
+    assert record["status"] == "planning"
+    assert record["check_failures"] == 1
+    assert "status code 429" in record["last_check_error"]
+    again = client.get(f"/api/research/{job_id}").json()
+    assert again["check_failures"] == 1  # not asked again: the gap is now two hours
+    assert calls == ["c_saved"]
+
+
+def test_a_running_job_is_checked_at_most_once_per_gap(env, monkeypatch):
+    client, backend, _ = env
+    job_id = new_plan(client)["id"]
+    assert client.post(f"/api/research/{job_id}/start").status_code == 200
+    monkeypatch.setattr(research_service, "REPORT_CHECK_SECONDS", 3600)
+
+    assert client.get(f"/api/research/{job_id}").json()["status"] == "running"
+    assert client.get(f"/api/research/{job_id}").json()["status"] == "running"
+    assert backend.polls == 1  # the second poll did not reach Gemini
 
 
 def test_research_running_past_the_limit_is_marked_failed(env, monkeypatch):
