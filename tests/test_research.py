@@ -220,7 +220,7 @@ def test_gemini_is_given_the_full_reply_budget_for_planning(env):
     for connect in backend.init_calls:
         assert connect["timeout"] == gemini_service.CLIENT_TIMEOUT_SECONDS
         assert connect["watchdog_timeout"] == gemini_service.CLIENT_TIMEOUT_SECONDS
-    assert gemini_service.CLIENT_TIMEOUT_SECONDS >= research_service.PLAN_TIMEOUT_SECONDS
+    assert gemini_service.CLIENT_TIMEOUT_SECONDS >= research_service.PLAN_STREAM_SECONDS
     assert gemini_service.CLIENT_TIMEOUT_SECONDS >= research_service.START_TIMEOUT_SECONDS
 
 
@@ -330,35 +330,59 @@ def test_a_plan_the_stream_loses_is_read_from_the_saved_chat(env, monkeypatch):
     backend.plan_error = GeminiError("Gemini did not return a deep research plan.")
     backend.stream_cid = "c_saved"
     calls: list[str] = []
-    monkeypatch.setattr(research_service, "PLAN_POLL_SECONDS", 0.01)
     monkeypatch.setattr(research_service, "read_saved_plan", saved_plan_reader(2, calls))
 
     resp = client.post("/api/research", json={"prompt": "Indian economy"})
     assert resp.status_code == 200, resp.text
-    job_id = resp.json()["id"]
-    record = client.get(f"/api/research/{job_id}").json()
+    job = resp.json()
+    assert job["status"] == "planning"
+    assert job["plan"] is None
+    assert calls == []  # the first request does not read the chat; the page's polls do
+
+    job_id = job["id"]
+    assert client.get(f"/api/research/{job_id}").json()["status"] == "planning"
+    assert client.get(f"/api/research/{job_id}").json()["status"] == "planning"
+    record = client.get(f"/api/research/{job_id}").json()  # the third read finds the plan
+    assert record["status"] == "planned"
     assert record["title"] == "Recovered plan"
     assert record["plan"]["cid"] == "c_saved"
-    assert calls == ["c_saved", "c_saved", "c_saved"]  # two empty reads, then the plan
+    assert calls == ["c_saved", "c_saved", "c_saved"]
 
     assert client.post(f"/api/research/{job_id}/start").status_code == 200
     assert backend.start_chats[-1]["cid"] == "c_saved"
 
 
-def test_a_saved_chat_with_no_plan_gives_a_504_within_the_budget(env, monkeypatch):
+def test_a_plan_still_being_written_cannot_be_started(env):
+    client, backend, _ = env
+    backend.plan_error = GeminiError("Gemini did not return a deep research plan.")
+    backend.stream_cid = "c_saved"
+    job_id = client.post("/api/research", json={"prompt": "anything"}).json()["id"]
+
+    resp = client.post(f"/api/research/{job_id}/start")
+    assert resp.status_code == 409
+    assert "still writing the plan" in resp.json()["detail"]
+    assert backend.start_chats == []
+
+
+def test_a_plan_that_never_appears_is_given_up_after_the_wait(env, monkeypatch):
     client, backend, _ = env
     backend.plan_error = GeminiError("Gemini did not return a deep research plan.")
     backend.stream_cid = "c_saved"
     calls: list[str] = []
-    monkeypatch.setattr(research_service, "PLAN_TIMEOUT_SECONDS", 0.2)
-    monkeypatch.setattr(research_service, "PLAN_POLL_SECONDS", 0.02)
     monkeypatch.setattr(research_service, "read_saved_plan", saved_plan_reader(10**6, calls))
+    job_id = client.post("/api/research", json={"prompt": "anything"}).json()["id"]
+    assert client.get(f"/api/research/{job_id}").json()["status"] == "planning"
+    assert calls == ["c_saved"]
 
-    resp = client.post("/api/research", json={"prompt": "anything"})
-    assert resp.status_code == 504
-    assert "did not finish the research plan" in resp.json()["detail"]
-    assert len(calls) > 1
-    assert client.get("/api/research").json()["jobs"] == []
+    monkeypatch.setattr(research_service, "PLAN_WAIT_SECONDS", -1)
+    record = client.get(f"/api/research/{job_id}").json()
+    assert record["status"] == "failed"
+    assert "did not finish the plan within 10 minutes" in record["error"]
+    assert calls == ["c_saved"]  # given up without another read
+
+    # A job with no plan cannot be started
+    assert client.post(f"/api/research/{job_id}/start").status_code == 409
+    assert backend.start_chats == []
 
 
 def test_a_timeout_from_gemini_is_not_read_from_the_saved_chat(env, monkeypatch):

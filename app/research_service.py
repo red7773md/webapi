@@ -4,6 +4,10 @@ Gemini does the research on its side and can take 5 to 10 minutes. One Vercel
 request cannot wait that long, so the job is saved after each step, and each
 poll reads the chat once and returns. The page polls until the report arrives.
 The report lives in the chat, so it survives even if this server restarts.
+
+The plan works the same way. The first request waits on the live stream for a
+short time. If the stream ends without a plan, the job is saved as "planning" and
+each poll reads the saved chat once, until the plan appears or the wait runs out.
 """
 
 from __future__ import annotations
@@ -35,14 +39,12 @@ log = logging.getLogger("gemini_webui")
 
 RESEARCH_INDEX = "research/index.json"
 MAX_PROMPT_CHARS = 1000
-# Gemini can take minutes to write a plan. The live stream gets PLAN_STREAM_SECONDS. If
-# the stream ends without a plan, the saved chat is read until PLAN_TIMEOUT_SECONDS
-# from the start of planning. Both stay under the function limit in vercel.json (300 s),
-# with room for connecting (up to 45 s) and saving the job.
+# The first plan request waits this long on the live stream. Under the function limit in
+# vercel.json (300 s), with room for connecting (up to 45 s) and saving the job.
 PLAN_STREAM_SECONDS = 150.0
-PLAN_TIMEOUT_SECONDS = 240.0
-PLAN_POLL_SECONDS = 10.0  # pause between saved-chat reads
-# Errors that re-reading the chat cannot fix, so the saved chat is not checked for them
+# A job whose plan has not appeared this long after it was made is given up.
+PLAN_WAIT_SECONDS = 10 * 60
+# Errors that re-reading the chat cannot fix, so a plan is not waited for after them
 _NO_RECOVERY = (
     GeminiTimeoutError,
     UsageLimitExceededError,
@@ -76,6 +78,13 @@ def _start_failure_message(exc: Exception) -> str:
     if isinstance(exc, GeminiNotReady):
         return str(exc)
     return describe_failure(exc)
+
+
+def _can_wait_for_saved_chat(exc: Exception, chat: Any) -> bool:
+    """The stream ended without a plan, but the chat exists, so the plan may still be saved."""
+    if not chat.cid or isinstance(exc, _NO_RECOVERY):
+        return False
+    return isinstance(exc, (asyncio.TimeoutError, GeminiError, APIError))
 
 
 @contextmanager
@@ -129,20 +138,49 @@ class ResearchService:
 
         client = await self._gemini.require_client()
         started = time.monotonic()
+        # The chat is created here, not inside the library, so its id is known even when
+        # the stream is cut. Gemini finishes the planning turn on its side either way.
+        chat = client.start_chat(model=model or None)
         try:
             with _logged_stream(client):
-                plan = await self._make_plan(client, prompt, model, started)
+                plan = await asyncio.wait_for(
+                    client.create_deep_research_plan(prompt, chat=chat),
+                    PLAN_STREAM_SECONDS,
+                )
         except Exception as exc:
-            log.warning("research plan failed after %.0f s: %s", time.monotonic() - started, exc)
-            raise
+            if not _can_wait_for_saved_chat(exc, chat):
+                log.warning("research plan failed after %.0f s: %s", time.monotonic() - started, exc)
+                raise
+            log.warning(
+                "research plan not in the live stream after %.0f s (%s); the page will check the saved chat",
+                time.monotonic() - started,
+                exc,
+            )
+            return await self._save_new_job(
+                prompt,
+                model,
+                plan=None,
+                chat={"cid": chat.cid, "metadata": list(chat.metadata)},
+            )
+        return await self._save_new_job(prompt, model, plan=plan, chat=None)
+
+    async def _save_new_job(
+        self,
+        prompt: str,
+        model: str | None,
+        plan: DeepResearchPlan | None,
+        chat: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         now = utc_now()
         job: dict[str, Any] = {
             "id": new_id(),
             "prompt": prompt,
             "model": model or None,
-            "status": "planned",
-            "title": plan.title or prompt[:80],
-            "plan": plan.model_dump(mode="json"),
+            "status": "planned" if plan else "planning",
+            "title": (plan.title if plan else None) or prompt[:80],
+            "plan": plan.model_dump(mode="json") if plan else None,
+            # While the plan is pending: the chat id and metadata to read it back from
+            "chat": chat,
             "report": None,
             "report_title": None,
             "sources": [],
@@ -158,6 +196,10 @@ class ResearchService:
     async def start(self, job_id: str) -> dict[str, Any]:
         job = await self.get_job(job_id)
         status = job["status"]
+        if status == "planning":
+            raise FeatureError(409, "Gemini is still writing the plan. Wait for it to appear, then start.")
+        if not job.get("plan"):
+            raise FeatureError(409, "This topic has no plan. Make a new plan from the topic.")
         if status in ("running", "done"):
             raise FeatureError(409, "This research has already started.")
         if status == "starting" and _seconds_since(job["updated_at"]) < STARTING_STALE_SECONDS:
@@ -204,6 +246,8 @@ class ResearchService:
 
     async def poll(self, job_id: str) -> dict[str, Any]:
         job = await self.get_job(job_id)
+        if job["status"] == "planning":
+            return await self._check_plan(job)
         if job["status"] != "running":
             return job  # nothing to check on Gemini's side
 
@@ -234,73 +278,49 @@ class ResearchService:
         await self._save(job)
         return job
 
-    async def _make_plan(
-        self, client: Any, prompt: str, model: str | None, started: float
-    ) -> DeepResearchPlan:
-        """Ask Gemini for a plan. If the live stream ends without one, read the saved chat.
+    async def _check_plan(self, job: dict[str, Any]) -> dict[str, Any]:
+        """Read the job's saved chat once. Adopt the plan if Gemini has written it."""
+        if _seconds_since(job["created_at"]) > PLAN_WAIT_SECONDS:
+            log.warning("no research plan after %d s; giving up on job %s", PLAN_WAIT_SECONDS, job["id"])
+            return await self._fail(
+                job,
+                "Gemini did not finish the plan within 10 minutes. Try the topic again.",
+            )
 
-        The chat is created here, not inside the library, so its id is known even when
-        the stream is cut. Gemini finishes the planning turn on its side either way.
-        """
-        chat = client.start_chat(model=model or None)
+        chat = job["chat"]
+        client = await self._gemini.require_client()
         try:
-            return await asyncio.wait_for(
-                client.create_deep_research_plan(prompt, chat=chat),
-                PLAN_STREAM_SECONDS,
-            )
-        except (asyncio.TimeoutError, GeminiError, APIError) as exc:
-            if not chat.cid or isinstance(exc, _NO_RECOVERY):
-                raise
-            log.warning(
-                "research plan not in the live stream after %.0f s (%s); reading the saved chat",
-                time.monotonic() - started,
-                exc,
-            )
-        return await self._plan_from_saved_chat(client, chat, started)
+            saved = await asyncio.wait_for(read_saved_plan(client, chat["cid"]), POLL_TIMEOUT_SECONDS)
+        except (asyncio.TimeoutError, APIError):
+            saved = None  # a read that fails is retried on the next poll
 
-    async def _plan_from_saved_chat(
-        self, client: Any, chat: Any, started: float
-    ) -> DeepResearchPlan:
-        deadline = started + PLAN_TIMEOUT_SECONDS
-        reads = 0
-        while True:
-            reads += 1
-            remaining = deadline - time.monotonic()
-            saved = None
-            if remaining > 0:
-                try:
-                    saved = await asyncio.wait_for(
-                        read_saved_plan(client, chat.cid),
-                        min(POLL_TIMEOUT_SECONDS, remaining),
-                    )
-                except (asyncio.TimeoutError, APIError):
-                    log.debug("saved chat read %d did not finish", reads, exc_info=True)
-            if saved is not None:
-                # Keep the chat's ids as the library would have set them, so the
-                # confirmation continues this same turn.
-                if saved.rid:
-                    chat.rid = saved.rid
-                if saved.rcid:
-                    chat.rcid = saved.rcid
-                plan = saved.plan
-                plan.cid = chat.cid
-                plan.metadata = list(chat.metadata)
-                log.warning(
-                    "research plan read from the saved chat after %.0f s (%d reads)",
-                    time.monotonic() - started,
-                    reads,
-                )
-                return plan
-            if deadline - time.monotonic() <= PLAN_POLL_SECONDS:
-                log.warning(
-                    "no research plan in the saved chat after %.0f s (%d reads)",
-                    time.monotonic() - started,
-                    reads,
-                )
-                raise FeatureError(
-                    504, "Gemini did not finish the research plan in time. Try again in a moment."
-                )
-            await asyncio.sleep(PLAN_POLL_SECONDS)
+        now = utc_now()
+        job["checked_at"] = now
+        job["updated_at"] = now
+        if saved is None:
+            await self._save(job)
+            return job
+
+        # Keep the chat's ids as the library would have set them, so the confirmation
+        # continues this same turn.
+        metadata = list(chat["metadata"])
+        metadata += [None] * max(0, 3 - len(metadata))
+        if saved.rid:
+            metadata[1] = saved.rid
+        if saved.rcid:
+            metadata[2] = saved.rcid
+        plan = saved.plan
+        plan.cid = chat["cid"]
+        plan.metadata = metadata
+        log.warning("research plan read from the saved chat for job %s", job["id"])
+        job.update(
+            status="planned",
+            title=plan.title or job["prompt"][:80],
+            plan=plan.model_dump(mode="json"),
+            chat=None,
+        )
+        await self._save(job)
+        return job
 
     async def _fail(self, job: dict[str, Any], message: str) -> dict[str, Any]:
         job["status"] = "failed"

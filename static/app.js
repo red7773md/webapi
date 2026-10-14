@@ -840,6 +840,7 @@
   const RESEARCH_POLL_MS = 6000;
   const RESEARCH_MAX_RETRIES = 5;
   const RESEARCH_STATUS = {
+    planning: "WRITING THE PLAN on gemini",
     planned: "PLAN READY. not started",
     starting: "STARTING...",
     running: "RUNNING on gemini",
@@ -860,6 +861,7 @@
     let pollTimer = null;
     let alive = true;
     let retries = 0;
+    let planWatch = null; // id of a plan the page is waiting on, for the ready notice
     const urls = []; // object URLs for downloads, released when the screen is left
 
     window.addEventListener(
@@ -990,11 +992,14 @@
           el("div", { class: "v", text: job.prompt }),
         ),
         job.status !== "done" && job.plan ? planBlock(job.plan) : null,
+        job.status === "planning"
+          ? el("p", { class: "hint", text: "Gemini is writing the plan. This page checks every few seconds. You can leave and come back." })
+          : null,
         job.status === "running"
           ? el("p", { class: "hint", text: "Gemini is researching. This page checks every few seconds. You can leave and come back." })
           : null,
         job.status === "failed" ? el("p", { class: "bad", text: job.error || "research failed." }) : null,
-        job.status === "planned" || job.status === "failed"
+        (job.status === "planned" || job.status === "failed") && job.plan
           ? el(
               "div",
               { class: "actions" },
@@ -1028,8 +1033,12 @@
         if (!alive || currentId !== id) return;
         retries = 0;
         drawJob(job);
-        if (job.status === "running") schedulePoll(id);
+        if (job.status === "running" || job.status === "planning") schedulePoll(id);
         else await loadList();
+        if (job.status === "planned" && planWatch === id) {
+          setNotice("plan ready. start the research when you are happy with it.", "ok");
+        }
+        if (job.status !== "planning" && planWatch === id) planWatch = null;
       } catch (err) {
         if (isAuthError(err)) return fail(err);
         const transient = err.status >= 500;
@@ -1052,7 +1061,7 @@
         const job = await api(`/api/research/${id}`);
         drawJob(job);
         setNotice("", "");
-        if (job.status === "running") schedulePoll(id);
+        if (job.status === "running" || job.status === "planning") schedulePoll(id);
       } catch (err) {
         fail(err);
       } finally {
@@ -1076,7 +1085,7 @@
         return;
       }
       setBusy(true);
-      setNotice("making a research plan with gemini. this can take a few minutes; keep this page open.", "dim");
+      setNotice("making a research plan with gemini. this takes a minute or two.", "dim");
       try {
         const job = await api("/api/research", {
           method: "POST",
@@ -1086,7 +1095,13 @@
         currentId = job.id;
         drawJob(job);
         await loadList();
-        setNotice("plan ready. start the research when you are happy with it.", "ok");
+        if (job.status === "planning") {
+          planWatch = job.id;
+          setNotice("gemini is still writing the plan. this page checks every few seconds.", "dim");
+          schedulePoll(job.id);
+        } else {
+          setNotice("plan ready. start the research when you are happy with it.", "ok");
+        }
       } catch (err) {
         fail(err);
       } finally {

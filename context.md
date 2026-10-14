@@ -36,7 +36,7 @@ Risk accepted by Emdad: unofficial endpoints can break, and the account used
 | 1 | Admin login, cookie import, verify uplink, terminal UI, Vercel-ready storage | **done and live** (2026-10-13): private Blob store, cookies saved, uplink verified on the deployed site, 3 models listed. 42 tests pass |
 | 2 | Chat module (multi-turn, file attachments, history) | built and tested: local tests, browser smoke test. Live check pending deploy |
 | 3 | Image generation module | built and tested: local tests, browser smoke test. Live check pending deploy |
-| 4 | Deep research module (plan, confirm, short polls, report view) | built and tested: 93 local tests in total, browser smoke test (plan, start, poll to report, source link, delete). Plan recovery from the saved chat added; live check pending deploy |
+| 4 | Deep research module (plan, confirm, short polls, report view) | built and tested: 94 local tests in total, browser smoke test (plan, start, poll to report, source link, delete). Plan recovery from the saved chat added; live check pending deploy |
 | — | ChatGPT client (unofficial, cookie-based) | not started |
 
 Step 1 commits: `6ca6eb4` (app), `7e18c36` (Vercel-ready storage), `48c6040`
@@ -72,7 +72,7 @@ tests/test_step1.py       37 tests; fake Gemini client and in-memory Blob HTTP
 tests/test_storage_errors.py  5 tests; Blob refusals and network failures
 tests/test_chat.py       14 tests; chat sends, attachments, errors, shared history
 tests/test_images.py    11 tests; prompts, stored bytes, admin-only serving, errors
-tests/test_research.py  19 tests; plan, start, polling, failed start, retry, 90-min limit,
+tests/test_research.py  20 tests; plan, start, polling, failed start, retry, 90-min limit,
                           plan recovered from the saved chat, saved chat without a plan
 tests/test_gemini_plan.py  7 tests; saved turns parsed, plan found, RPC payload, log line
 ```
@@ -158,20 +158,23 @@ set -a; . ./.env; set +a
 - Chromium-based browsers issue device-bound cookies that can expire within hours.
   Firefox cookies last longer. This is in the README and the UI hint.
 - Deep research runs for 5–10 minutes. Planning and starting wait for Gemini's reply
-  inside the request, because Gemini needs time to write the plan. Planning: the live
-  stream gets 150 s. If it ends without a plan, the saved chat is read every 10 s until
-  240 s from the start of planning (`PLAN_STREAM_SECONDS`, `PLAN_TIMEOUT_SECONDS`).
-  Starting: up to 240 s.
-  That needs `maxDuration` 300 in vercel.json. If Vercel refuses the setting for this
-  plan, the build fails; then lower the caps in research_service.py. The run itself
-  is polled with short requests (one chat read each, page checks every 6 s).
+  inside one request, capped at 150 s for the plan stream (`PLAN_STREAM_SECONDS`) and
+  240 s for the start. If the plan stream ends without a plan, the job is saved as
+  `planning` and returned. The page then polls it every 6 s; each poll reads the saved
+  chat once, and the plan is adopted as soon as it appears. A plan still missing after
+  10 minutes (`PLAN_WAIT_SECONDS`) fails the job. Starting needs `maxDuration` 300 in
+  vercel.json. If Vercel refuses the setting for this plan, the build fails; then lower
+  the caps in research_service.py. The run itself is polled the same way.
 - A research job is marked failed after 90 minutes without a report. If the browser
   is closed, the job is still on the server; reopen the RESEARCH screen to see it.
 - A research start that times out (240 s) may still have started at Gemini. The job
   shows failed with that note; check the Gemini app before pressing RETRY START.
-- The chat ID is known even when the stream is cut, so the plan can be read from the
-  saved chat. If no plan appears within 240 s, the request returns 504 and nothing is
-  saved; retry from the topic.
+- Live test on 14 Oct (request jlrcq): the stream ended at 70 s with an empty reply.
+  The saved planning turn then stayed at status 1 (still generating) with no plan
+  content for 17 reads over about 4 minutes. The old single request gave up at 240 s
+  with a 504. The page showed the waiting notice only, so it looked stuck. The
+  planning state above keeps the job alive for up to 10 minutes and shows progress.
+  Whether Gemini ever finishes these turns is not yet known.
 - Plan and start calls run with the library's verbose log on. Vercel logs show
   `research plan failed after N s` with the error, plus the HTTP status and whether the
   full reply arrived. Use these lines to find where a research request stops.
