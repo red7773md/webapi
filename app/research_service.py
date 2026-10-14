@@ -43,7 +43,7 @@ MAX_PROMPT_CHARS = 1000
 # vercel.json (300 s), with room for connecting (up to 45 s) and saving the job.
 PLAN_STREAM_SECONDS = 150.0
 # A job whose plan has not appeared this long after it was made is given up.
-PLAN_WAIT_SECONDS = 10 * 60
+PLAN_WAIT_SECONDS = 30 * 60
 # Errors that re-reading the chat cannot fix, so a plan is not waited for after them
 _NO_RECOVERY = (
     GeminiTimeoutError,
@@ -279,25 +279,32 @@ class ResearchService:
         return job
 
     async def _check_plan(self, job: dict[str, Any]) -> dict[str, Any]:
-        """Read the job's saved chat once. Adopt the plan if Gemini has written it."""
-        if _seconds_since(job["created_at"]) > PLAN_WAIT_SECONDS:
-            log.warning("no research plan after %d s; giving up on job %s", PLAN_WAIT_SECONDS, job["id"])
-            return await self._fail(
-                job,
-                "Gemini did not finish the plan within 10 minutes. Try the topic again.",
-            )
+        """Read the job's saved chat once. Adopt the plan if Gemini has written it.
 
+        The chat is read before the wait is judged. A job nobody polled for a long time
+        still gets its plan if Gemini wrote one.
+        """
         chat = job["chat"]
         client = await self._gemini.require_client()
         try:
             saved = await asyncio.wait_for(read_saved_plan(client, chat["cid"]), POLL_TIMEOUT_SECONDS)
-        except (asyncio.TimeoutError, APIError):
-            saved = None  # a read that fails is retried on the next poll
+            chat["last_error"] = None
+        except (asyncio.TimeoutError, APIError) as exc:
+            saved = None
+            chat["last_error"] = str(exc) or type(exc).__name__
+            log.warning("saved chat read failed for job %s: %s", job["id"], chat["last_error"])
 
         now = utc_now()
         job["checked_at"] = now
         job["updated_at"] = now
         if saved is None:
+            if _seconds_since(job["created_at"]) > PLAN_WAIT_SECONDS:
+                log.warning("no research plan after %d s; giving up on job %s", PLAN_WAIT_SECONDS, job["id"])
+                detail = f" Last check: {chat['last_error']}." if chat.get("last_error") else ""
+                return await self._fail(
+                    job,
+                    f"Gemini did not finish the plan within 30 minutes. Try the topic again.{detail}",
+                )
             await self._save(job)
             return job
 

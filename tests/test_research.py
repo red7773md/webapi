@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from gemini_webapi import Citation, DeepResearchDocument, DeepResearchPlan, GeminiError
 
+from gemini_webapi import APIError
 from gemini_webapi import TimeoutError as GeminiTimeoutError
 
 from app import gemini_service, research_service
@@ -377,12 +378,45 @@ def test_a_plan_that_never_appears_is_given_up_after_the_wait(env, monkeypatch):
     monkeypatch.setattr(research_service, "PLAN_WAIT_SECONDS", -1)
     record = client.get(f"/api/research/{job_id}").json()
     assert record["status"] == "failed"
-    assert "did not finish the plan within 10 minutes" in record["error"]
-    assert calls == ["c_saved"]  # given up without another read
+    assert "did not finish the plan within 30 minutes" in record["error"]
+    assert calls == ["c_saved", "c_saved"]  # the chat is read once more before giving up
 
     # A job with no plan cannot be started
     assert client.post(f"/api/research/{job_id}/start").status_code == 409
     assert backend.start_chats == []
+
+
+def test_a_plan_written_after_a_long_gap_is_still_found(env, monkeypatch):
+    """Nobody polled the job for longer than the wait. The plan is still adopted."""
+    client, backend, _ = env
+    backend.plan_error = GeminiError("Gemini did not return a deep research plan.")
+    backend.stream_cid = "c_saved"
+    calls: list[str] = []
+    monkeypatch.setattr(research_service, "read_saved_plan", saved_plan_reader(0, calls))
+    job_id = client.post("/api/research", json={"prompt": "Indian GDP growth"}).json()["id"]
+
+    monkeypatch.setattr(research_service, "PLAN_WAIT_SECONDS", -1)
+    record = client.get(f"/api/research/{job_id}").json()
+    assert record["status"] == "planned"
+    assert record["title"] == "Recovered plan"
+
+
+def test_a_plan_that_never_appears_says_why_the_last_read_failed(env, monkeypatch):
+    client, backend, _ = env
+    backend.plan_error = GeminiError("Gemini did not return a deep research plan.")
+    backend.stream_cid = "c_saved"
+
+    async def refused(client, cid, limit=10):
+        raise APIError("Batch execution failed with status code 400")
+
+    monkeypatch.setattr(research_service, "read_saved_plan", refused)
+    job_id = client.post("/api/research", json={"prompt": "anything"}).json()["id"]
+    assert client.get(f"/api/research/{job_id}").json()["status"] == "planning"
+
+    monkeypatch.setattr(research_service, "PLAN_WAIT_SECONDS", -1)
+    record = client.get(f"/api/research/{job_id}").json()
+    assert record["status"] == "failed"
+    assert "status code 400" in record["error"]
 
 
 def test_a_timeout_from_gemini_is_not_read_from_the_saved_chat(env, monkeypatch):

@@ -46,9 +46,11 @@ class FakeBatchClient:
     def __init__(self, text: str) -> None:
         self.text = text
         self.payloads: list[str] = []
+        self.close_on_error: list[bool] = []
 
-    async def _batch_execute(self, payloads):
+    async def _batch_execute(self, payloads, close_on_error=True, **_):
         self.payloads.extend(p.payload for p in payloads)
+        self.close_on_error.append(close_on_error)
         return SimpleNamespace(text=self.text)
 
 
@@ -89,6 +91,7 @@ def test_read_saved_plan_asks_for_the_chat_turns_and_returns_the_plan():
     saved = asyncio.run(read_saved_plan(client, "c_saved"))
 
     assert client.payloads == ['["c_saved",10,null,1,[1],[4],null,1]']
+    assert client.close_on_error == [False]  # a failed read must not close the shared client
     assert saved is not None
     assert saved.plan.title == "Battery recycling plan"
     assert (saved.rid, saved.rcid) == ("r_1", "rc_1")

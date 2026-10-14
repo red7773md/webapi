@@ -95,7 +95,10 @@ def describe_turns(turns: list) -> str:
 async def read_saved_plan(client: Any, cid: str, limit: int = 10) -> SavedPlan | None:
     """The plan in the chat's latest turns, or None while Gemini has not written one."""
     response = await client._batch_execute(
-        [RPCData(rpcid=GRPC.LIST_CONVERSATION_TURNS, payload=_turns_payload(cid, limit))]
+        [RPCData(rpcid=GRPC.LIST_CONVERSATION_TURNS, payload=_turns_payload(cid, limit))],
+        # By default the library closes the client on a failed call. The client is shared
+        # by the other requests, so a failed read must leave it open.
+        close_on_error=False,
     )
     turns = turns_from_response(response.text)
     saved = find_saved_plan(turns)
