@@ -8,10 +8,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from gemini_webapi import AuthError
+from gemini_webapi import AuthError, GeminiError
 
 from app import chat_service
 from app.config import Settings
@@ -46,6 +47,25 @@ class Backend:
         self.sent: list[dict] = []
         self.fail_with: Exception | None = None
         self.delay = 0.0
+        self.early_cid = False  # Gemini names the chat before the reply is finished
+        self.saved_turns: list = []  # what the saved chat holds, newest first
+        self.reads = 0
+        self.read_error: Exception | None = None
+
+
+def wire(parts: list) -> str:
+    """Frame JSON the way the batch endpoint does: each payload is preceded by its length."""
+    body = json.dumps(parts)
+    return ")]}'\n\n" + f"{len(body.encode('utf-16-le')) // 2}\n{body}\n"
+
+
+def saved_turn(rid: str, text: str, finished: bool = True) -> list:
+    """One turn of a saved chat, shaped as the conversation-turns read returns it."""
+    candidate = [None] * 13
+    candidate[0] = f"rc_{rid}"
+    candidate[1] = [text]
+    candidate[8] = [2 if finished else 1]
+    return [["c_fake", rid], None, [["question"]], [[candidate]]]
 
 
 class FakeModel:
@@ -70,6 +90,8 @@ class FakeSession:
         return list(self._metadata)
 
     async def send_message(self, prompt, files=None, **_):
+        if self._backend.early_cid:
+            self._metadata = ["c_fake"]
         if self._backend.delay:
             await asyncio.sleep(self._backend.delay)
         if self._backend.fail_with is not None:
@@ -95,6 +117,13 @@ class FakeClient:
     def start_chat(self, **kwargs):
         self._backend.started.append(kwargs)
         return FakeSession(self._backend, kwargs.get("metadata"))
+
+    async def _batch_execute(self, payloads, close_on_error=True, **_):
+        self._backend.reads += 1
+        if self._backend.read_error is not None:
+            raise self._backend.read_error
+        turns = self._backend.saved_turns
+        return SimpleNamespace(text=wire([["wrb.fr", "hNvQHb", json.dumps([turns]), None, None, None, "generic"]]))
 
     async def close(self, delay: float = 0) -> None:
         return None
@@ -124,8 +153,9 @@ def build(settings, backend, store):
 
 
 @pytest.fixture
-def env(settings):
-    """A logged-in app with a verified (fake) Gemini connection."""
+def env(settings, monkeypatch):
+    """A logged-in app with a verified (fake) Gemini connection. Checks are not spaced out."""
+    monkeypatch.setattr(chat_service, "CHECK_SECONDS", 0.0)
     backend, store = Backend(), MemoryStore()
     with TestClient(build(settings, backend, store)) as client:
         login(client)
@@ -237,13 +267,132 @@ def test_gemini_rejecting_cookies_gives_a_plain_502(env):
     assert resp.json()["detail"] == "Google rejected these cookies. Copy fresh values from a logged-in browser session."
 
 
-def test_slow_gemini_reply_gives_a_504(env, monkeypatch):
+def test_slow_reply_returns_the_chat_id_at_once_as_waiting(env, monkeypatch):
     client, backend, _ = env
-    monkeypatch.setattr(chat_service, "SEND_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(chat_service, "SEND_WAIT_SECONDS", 0.05)
     backend.delay = 1.0
-    resp = client.post("/api/chat/send", json={"message": "slow"})
-    assert resp.status_code == 504
-    assert "did not finish in time" in resp.json()["detail"]
+    backend.early_cid = True
+    resp = client.post("/api/chat/send", json={"message": "think hard"})
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["status"] == "waiting"
+    assert body["chat"]["id"] and body["chat"]["status"] == "waiting"
+    assert [m["role"] for m in body["messages"]] == ["user"]  # no reply yet
+
+
+def test_the_reply_is_fetched_by_the_chat_id_once_gemini_has_it(env, monkeypatch):
+    client, backend, _ = env
+    monkeypatch.setattr(chat_service, "SEND_WAIT_SECONDS", 0.05)
+    backend.delay = 1.0
+    backend.early_cid = True
+    chat_id = client.post("/api/chat/send", json={"message": "think hard"}).json()["chat"]["id"]
+
+    waiting = client.get(f"/api/chat/{chat_id}").json()
+    assert waiting["status"] == "waiting"
+    assert [m["role"] for m in waiting["messages"]] == ["user"]
+
+    backend.saved_turns = [saved_turn("r_1", "The finished answer.")]
+    done = client.get(f"/api/chat/{chat_id}").json()
+    assert done["status"] == "answered"
+    assert [m["text"] for m in done["messages"]] == ["think hard", "The finished answer."]
+    assert done["metadata"][:3] == ["c_fake", "r_1", "rc_r_1"]
+    assert client.get("/api/chat").json()["chats"][0]["status"] == "answered"
+
+
+def test_a_follow_up_while_the_reply_is_waiting_is_a_409(env, monkeypatch):
+    client, backend, _ = env
+    monkeypatch.setattr(chat_service, "SEND_WAIT_SECONDS", 0.05)
+    backend.delay = 1.0
+    backend.early_cid = True
+    chat_id = client.post("/api/chat/send", json={"message": "first"}).json()["chat"]["id"]
+    resp = client.post("/api/chat/send", json={"chat_id": chat_id, "message": "second"})
+    assert resp.status_code == 409
+    assert "still being answered" in resp.json()["detail"]
+
+
+def test_a_follow_up_after_the_reply_continues_the_same_chat(env):
+    client, backend, _ = env
+    chat_id = client.post("/api/chat/send", json={"message": "one"}).json()["chat"]["id"]
+    resp = client.post("/api/chat/send", json={"chat_id": chat_id, "message": "two"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "answered"
+    assert resp.json()["chat"]["id"] == chat_id
+    assert backend.started[-1]["metadata"] == ["c_fake", "r_1", "rc_1"]
+
+
+def test_a_reply_before_the_previous_one_is_not_taken_for_the_new_reply(env, monkeypatch):
+    client, backend, _ = env
+    chat_id = client.post("/api/chat/send", json={"message": "one"}).json()["chat"]["id"]
+    monkeypatch.setattr(chat_service, "SEND_WAIT_SECONDS", 0.05)
+    backend.delay = 1.0
+    client.post("/api/chat/send", json={"chat_id": chat_id, "message": "two"})
+
+    # The saved chat still shows the answer to "one" as its newest finished turn.
+    backend.saved_turns = [saved_turn("r_1", "Answer to one.")]
+    assert client.get(f"/api/chat/{chat_id}").json()["status"] == "waiting"
+
+    backend.saved_turns = [saved_turn("r_2", "Answer to two."), saved_turn("r_1", "Answer to one.")]
+    done = client.get(f"/api/chat/{chat_id}").json()
+    assert done["status"] == "answered"
+    assert done["messages"][-1]["text"] == "Answer to two."
+
+
+def test_checks_of_a_waiting_reply_are_spaced_out(env, monkeypatch):
+    client, backend, _ = env
+    monkeypatch.setattr(chat_service, "SEND_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(chat_service, "CHECK_SECONDS", 60.0)
+    backend.delay = 1.0
+    backend.early_cid = True
+    chat_id = client.post("/api/chat/send", json={"message": "slow"}).json()["chat"]["id"]
+    before = backend.reads
+    for _ in range(5):
+        assert client.get(f"/api/chat/{chat_id}").json()["status"] == "waiting"
+    assert backend.reads - before == 1  # the first check is due, the rest fall inside the gap
+
+
+def test_a_failed_check_is_recorded_and_the_chat_stays_waiting(env, monkeypatch):
+    client, backend, _ = env
+    monkeypatch.setattr(chat_service, "SEND_WAIT_SECONDS", 0.05)
+    backend.delay = 1.0
+    backend.early_cid = True
+    chat_id = client.post("/api/chat/send", json={"message": "slow"}).json()["chat"]["id"]
+    backend.read_error = GeminiError("Gemini is busy")
+    resp = client.get(f"/api/chat/{chat_id}").json()
+    assert resp["status"] == "waiting"
+    assert "Gemini is busy" in resp["pending"]["last_check_error"]
+    assert resp["pending"]["check_failures"] == 1
+
+
+def test_a_reply_never_written_is_given_up_after_the_wait(env, monkeypatch):
+    client, backend, _ = env
+    monkeypatch.setattr(chat_service, "SEND_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(chat_service, "REPLY_WAIT_SECONDS", 0.0)
+    backend.delay = 1.0
+    backend.early_cid = True
+    chat_id = client.post("/api/chat/send", json={"message": "lost"}).json()["chat"]["id"]
+    resp = client.get(f"/api/chat/{chat_id}").json()
+    assert resp["status"] == "failed"
+    assert "did not reply within 30 minutes" in resp["pending"]["error"]
+
+
+def test_a_send_with_no_chat_id_before_the_wait_is_failed_but_keeps_its_id(env, monkeypatch):
+    client, backend, _ = env
+    monkeypatch.setattr(chat_service, "SEND_WAIT_SECONDS", 0.05)
+    backend.delay = 1.0  # no early_cid: Gemini never names the chat
+    resp = client.post("/api/chat/send", json={"message": "stuck"})
+    assert resp.status_code == 200
+    chat_id = resp.json()["chat"]["id"]
+    assert resp.json()["status"] == "failed"
+    got = client.get(f"/api/chat/{chat_id}").json()
+    assert got["status"] == "failed"
+    assert "Send it again" in got["pending"]["error"]
+
+    monkeypatch.setattr(chat_service, "SEND_WAIT_SECONDS", 25.0)
+    backend.delay = 0.0
+    again = client.post("/api/chat/send", json={"chat_id": chat_id, "message": "again"})
+    assert again.status_code == 200
+    assert again.json()["status"] == "answered"
+    assert again.json()["chat"]["status"] == "answered"
 
 
 def test_sending_without_a_connection_is_a_409(settings):

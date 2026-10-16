@@ -17,7 +17,6 @@ import logging
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from typing import Any
 
 from gemini_webapi import (
@@ -30,6 +29,7 @@ from gemini_webapi import (
 )
 from gemini_webapi import TimeoutError as GeminiTimeoutError
 
+from .checks import check_is_due, error_text, seconds_since
 from .cookie_store import utc_now
 from .gemini_plan import read_saved_plan
 from .gemini_service import GeminiNotReady, GeminiService, describe_failure
@@ -48,7 +48,6 @@ PLAN_WAIT_SECONDS = 30 * 60
 # checks more frequent. A failed check doubles the gap, up to MAX_CHECK_GAP_SECONDS.
 PLAN_CHECK_SECONDS = 20.0
 REPORT_CHECK_SECONDS = 60.0
-MAX_CHECK_GAP_SECONDS = 600.0
 # Errors that re-reading the chat cannot fix, so a plan is not waited for after them
 _NO_RECOVERY = (
     GeminiTimeoutError,
@@ -62,17 +61,6 @@ STARTING_STALE_SECONDS = 120  # a "starting" job this old was interrupted and ma
 MAX_RUNNING_SECONDS = 90 * 60
 
 
-def _error_text(exc: Exception) -> str:
-    return str(exc) or type(exc).__name__
-
-
-def _check_is_due(job: dict[str, Any], gap: float) -> bool:
-    """Whether enough time has passed since the job's last check to ask Gemini again."""
-    failures = int(job.get("check_failures") or 0)
-    needed = min(gap * 2 ** min(failures, 10), MAX_CHECK_GAP_SECONDS)
-    return _seconds_since(job.get("checked_at")) >= needed
-
-
 def record_name(job_id: str) -> str:
     return f"research/{job_id}.json"
 
@@ -80,12 +68,6 @@ def record_name(job_id: str) -> str:
 def _report_ready(output: Any) -> bool:
     document = getattr(output, "deep_research_document", None)
     return bool(document and document.ready)
-
-
-def _seconds_since(iso: str | None) -> float:
-    if not iso:
-        return float("inf")
-    return (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds()
 
 
 def _start_failure_message(exc: Exception) -> str:
@@ -218,7 +200,7 @@ class ResearchService:
             raise FeatureError(409, "This topic has no plan. Make a new plan from the topic.")
         if status in ("running", "done"):
             raise FeatureError(409, "This research has already started.")
-        if status == "starting" and _seconds_since(job["updated_at"]) < STARTING_STALE_SECONDS:
+        if status == "starting" and seconds_since(job["updated_at"]) < STARTING_STALE_SECONDS:
             raise FeatureError(409, "The start is already in progress. Wait a moment, then refresh.")
 
         job["status"] = "starting"
@@ -269,9 +251,9 @@ class ResearchService:
         if job["status"] != "running":
             return job  # nothing to check on Gemini's side
 
-        if _seconds_since(job["started_at"]) > MAX_RUNNING_SECONDS:
+        if seconds_since(job["started_at"]) > MAX_RUNNING_SECONDS:
             return await self._fail(job, "Research did not finish within 90 minutes.")
-        if not _check_is_due(job, REPORT_CHECK_SECONDS):
+        if not check_is_due(job, REPORT_CHECK_SECONDS):
             return job  # checked recently; Gemini is not asked again yet
 
         plan = DeepResearchPlan.model_validate(job["plan"])
@@ -309,7 +291,7 @@ class ResearchService:
         The chat is read before the wait is judged. A job nobody polled for a long time
         still gets its plan if Gemini wrote one.
         """
-        if not _check_is_due(job, PLAN_CHECK_SECONDS):
+        if not check_is_due(job, PLAN_CHECK_SECONDS):
             return job  # checked recently; Gemini is not asked again yet
 
         chat = job["chat"]
@@ -322,9 +304,9 @@ class ResearchService:
             failure = exc
 
         if saved is None:
-            if _seconds_since(job["created_at"]) > PLAN_WAIT_SECONDS:
+            if seconds_since(job["created_at"]) > PLAN_WAIT_SECONDS:
                 log.warning("no research plan after %d s; giving up on job %s", PLAN_WAIT_SECONDS, job["id"])
-                detail = f" Last check: {_error_text(failure)}." if failure else ""
+                detail = f" Last check: {error_text(failure)}." if failure else ""
                 return await self._fail(
                     job,
                     f"Gemini did not finish the plan within 30 minutes. Try the topic again.{detail}",
@@ -363,7 +345,7 @@ class ResearchService:
     async def _record_failure(self, job: dict[str, Any], exc: Exception) -> dict[str, Any]:
         """A check Gemini could not answer. The next check waits twice as long."""
         job["check_failures"] = int(job.get("check_failures") or 0) + 1
-        job["last_check_error"] = _error_text(exc)
+        job["last_check_error"] = error_text(exc)
         now = utc_now()
         job["checked_at"] = now
         job["updated_at"] = now

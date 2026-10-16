@@ -62,17 +62,21 @@ def chat_router(service: ChatService) -> APIRouter:
         return {"chats": await service.list_chats()}
 
     @router.post("/send")
-    async def send(body: ChatSendIn) -> dict[str, Any]:
-        return await service.send(
+    async def send(body: ChatSendIn, response: Response) -> dict[str, Any]:
+        result = await service.send(
             chat_id=body.chat_id,
             message=body.message,
             model=body.model,
             attachments=decode_files(body.files),
         )
+        if result["status"] == "waiting":
+            # Accepted, and Gemini is still writing. Keep the chat id and read it later with GET.
+            response.status_code = 202
+        return result
 
     @router.get("/{chat_id}")
     async def get_chat(chat_id: str = CHAT_ID) -> dict[str, Any]:
-        return await service.get_chat(chat_id)
+        return await service.read_chat(chat_id)
 
     @router.delete("/{chat_id}")
     async def delete_chat(chat_id: str = CHAT_ID) -> dict[str, bool]:

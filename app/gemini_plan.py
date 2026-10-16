@@ -3,7 +3,8 @@
 Gemini sends a plan on the live stream, but the stream can be cut before the plan
 arrives. Gemini still finishes the planning turn on its side, so the plan is in the
 saved chat. The library's chat reader keeps the research report but drops the plan,
-so this module reads the same turns and keeps the plan.
+so this module reads the same turns and keeps the plan. The same read finds the reply
+to a chat message when the stream was cut before it ended.
 
 It relies on two library internals: `_batch_execute` and the conversation-turns RPC
 id. Both belong to the pinned gemini-webapi version in requirements.txt.
@@ -92,15 +93,53 @@ def describe_turns(turns: list) -> str:
     )
 
 
-async def read_saved_plan(client: Any, cid: str, limit: int = 10) -> SavedPlan | None:
-    """The plan in the chat's latest turns, or None while Gemini has not written one."""
+async def read_saved_turns(client: Any, cid: str, limit: int = 10) -> list:
+    """The latest turns of a saved chat, newest first. Empty if the read has none."""
     response = await client._batch_execute(
         [RPCData(rpcid=GRPC.LIST_CONVERSATION_TURNS, payload=_turns_payload(cid, limit))],
         # By default the library closes the client on a failed call. The client is shared
         # by the other requests, so a failed read must leave it open.
         close_on_error=False,
     )
-    turns = turns_from_response(response.text)
+    return turns_from_response(response.text)
+
+
+# Gemini marks a finished candidate with status 2 (the library's read_chat checks the same).
+CANDIDATE_FINISHED = 2
+
+
+@dataclass(frozen=True)
+class SavedReply:
+    text: str
+    rid: str  # the reply id of the turn
+    rcid: str  # the candidate id of the reply
+
+
+def find_saved_reply(turns: list, after_rid: str | None) -> SavedReply | None:
+    """The newest finished reply whose turn is not `after_rid`, the reply before the one sent.
+
+    A turn still being written has no finished candidate, so it is skipped until it is done.
+    """
+    for conv_turn in turns:
+        rid = get_nested_value(conv_turn, [0, 1], "")
+        if not isinstance(rid, str) or (after_rid and rid == after_rid):
+            continue
+        for candidate in get_nested_value(conv_turn, [3, 0]) or []:
+            if not isinstance(candidate, list):
+                continue
+            if get_nested_value(candidate, [8, 0]) != CANDIDATE_FINISHED:
+                continue
+            text = get_nested_value(candidate, [1, 0], "")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            rcid = get_nested_value(candidate, [0], "")
+            return SavedReply(text=text.strip(), rid=rid, rcid=rcid if isinstance(rcid, str) else "")
+    return None
+
+
+async def read_saved_plan(client: Any, cid: str, limit: int = 10) -> SavedPlan | None:
+    """The plan in the chat's latest turns, or None while Gemini has not written one."""
+    turns = await read_saved_turns(client, cid, limit)
     saved = find_saved_plan(turns)
     if saved is None:
         # Logged as a warning: the app does not configure logging, so only warnings reach
