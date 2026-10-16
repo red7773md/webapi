@@ -459,11 +459,15 @@
       onclick: () => remove(),
       text: "[ DELETE CHAT ]",
     });
-    const controls = [sendBtn, newBtn, input, modelSelect, fileInput];
+    const controls = [sendBtn, input, modelSelect, fileInput];
+    // True while Gemini is still writing the reply to the chat on screen.
+    let awaitingReply = false;
+    let replyTimer = null;
 
     const setBusy = (on) => {
-      controls.forEach((c) => (c.disabled = on));
-      deleteBtn.disabled = on || chatId === null;
+      controls.forEach((c) => (c.disabled = on || awaitingReply));
+      newBtn.disabled = on;
+      deleteBtn.disabled = on || awaitingReply || chatId === null;
     };
 
     const setNotice = (text, cls = "") => {
@@ -518,7 +522,12 @@
               onclick: () => openChat(c.id),
               text: c.title || "untitled",
             }),
-            el("div", { class: "dim", text: `${shortTime(c.updated_at)} · ${c.message_count} msgs` }),
+            el("div", {
+              class: "dim",
+              text: `${shortTime(c.updated_at)} · ${c.message_count} msgs${
+                c.status === "waiting" ? " · writing" : c.status === "failed" ? " · no reply" : ""
+              }`,
+            }),
           ),
         ),
       );
@@ -539,6 +548,7 @@
     const loadModels = () => fillModelSelect(modelSelect);
 
     const openChat = async (id) => {
+      stopWatching();
       setBusy(true);
       try {
         const chat = await api(`/api/chat/${id}`);
@@ -549,6 +559,8 @@
         showTranscript(chat.messages || []);
         setNotice(`opened "${chat.title || "untitled"}".`, "dim");
         drawList();
+        if (chat.status === "waiting") watchReply(chat.id);
+        else if (chat.status === "failed") setNotice(chat.pending?.error || "gemini did not reply.", "bad");
       } catch (err) {
         fail(err);
       } finally {
@@ -557,6 +569,7 @@
     };
 
     function newChat() {
+      stopWatching();
       chatId = null;
       queued = [];
       fileInput.value = "";
@@ -568,14 +581,63 @@
       input.focus();
     }
 
+    const CHAT_POLL_MS = 20000;
+
+    const stopWatching = () => {
+      clearTimeout(replyTimer);
+      replyTimer = null;
+      awaitingReply = false;
+    };
+
+    // Waits for the reply to a chat id. Each check asks the server, which asks Gemini
+    // no more often than its own gap allows.
+    const watchReply = (id) => {
+      clearTimeout(replyTimer);
+      awaitingReply = true;
+      setBusy(false);
+      transcript.querySelector(".pending-line")?.remove();
+      transcript.append(el("p", { class: "dim pending-line", text: "gemini is writing the reply..." }));
+      transcript.scrollTop = transcript.scrollHeight;
+      setNotice("gemini is still writing. this page checks every 20 seconds. you can leave and come back.", "dim");
+      replyTimer = setTimeout(() => checkReply(id), CHAT_POLL_MS);
+    };
+
+    const checkReply = async (id) => {
+      replyTimer = null;
+      if (id !== chatId) return; // another chat is open now
+      try {
+        const chat = await api(`/api/chat/${id}`);
+        if (id !== chatId) return;
+        if (chat.status === "waiting") {
+          watchReply(id);
+          return;
+        }
+        stopWatching();
+        showTranscript(chat.messages || []);
+        if (chat.status === "failed") setNotice(chat.pending?.error || "gemini did not reply.", "bad");
+        else setNotice("reply received.", "ok");
+        setBusy(false);
+        await loadList();
+      } catch (err) {
+        if (id !== chatId) return;
+        stopWatching();
+        setBusy(false);
+        fail(err);
+      }
+    };
+
     const send = async () => {
+      if (awaitingReply) {
+        setNotice("gemini is still answering this chat. wait for the reply.", "warn");
+        return;
+      }
       const text = input.value.trim();
       if (!text) {
         setNotice("type a message first.", "warn");
         return;
       }
       setBusy(true);
-      setNotice("awaiting gemini... (can take up to a minute)", "dim");
+      setNotice("sending to gemini...", "dim");
       try {
         const files = [];
         for (const f of queued) files.push({ name: f.name, data: await readFileBase64(f) });
@@ -590,7 +652,10 @@
         renderQueued();
         appendMessages(res.messages);
         await loadList();
-        setNotice(`reply received. ${res.chat.message_count} messages in this chat.`, "ok");
+        if (res.status === "waiting") watchReply(res.chat.id);
+        else if (res.status === "failed")
+          setNotice("gemini did not confirm the message in time. the chat is saved; send the message again.", "bad");
+        else setNotice(`reply received. ${res.chat.message_count} messages in this chat.`, "ok");
       } catch (err) {
         fail(err);
       } finally {
