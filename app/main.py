@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.requests import Request as StarletteRequest
 
 from .config import BASE_DIR, Settings, load_settings
 from .cookie_store import CookieStore, parse_cookie_text
@@ -24,6 +25,7 @@ from .feature_routes import chat_router, image_router, research_router
 from .image_service import ImageService
 from .research_service import ResearchService
 from .gemini_service import GeminiService
+from .mcp_tools import build_mcp
 from .records import JsonStore, register_error_handlers
 from .security import LoginThrottle, credentials_match
 from .storage import BlobStore, KeyValueStore, LocalFileStore, StorageError
@@ -80,9 +82,12 @@ def create_app(
     research = ResearchService(service, records)
     throttle = LoginThrottle()
 
+    mcp = build_mcp(chats)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        yield
+        async with mcp.session_manager.run():
+            yield
         await service.shutdown()
 
     app = FastAPI(
@@ -124,26 +129,34 @@ def create_app(
             return auth[7:].strip()
         return request.headers.get("x-api-key", "").strip() or request.query_params.get("key", "").strip()
 
+    def api_key_ok(request: Request) -> bool:
+        """True when the request carries the app's API key. Wrong keys are throttled per client,
+        separately from failed logins. Raises 429 while that client is locked out."""
+        if not settings.api_key:
+            return False
+        provided = presented_key(request)
+        throttle_key = "key:" + _client_key(request, settings.on_vercel)
+        wait = throttle.retry_after(throttle_key)
+        if wait > 0:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many failed attempts. Try again in {int(wait) + 1}s.",
+                headers={"Retry-After": str(int(wait) + 1)},
+            )
+        if not provided:
+            return False
+        if secrets.compare_digest(provided.encode(), settings.api_key.encode()):
+            throttle.record_success(throttle_key)
+            return True
+        throttle.record_failure(throttle_key)
+        return False
+
     def require_user(request: Request) -> str:
         """Feature routes accept a browser login or the app's API key. Cookie routes stay login-only."""
         if request.session.get("admin"):
             return str(request.session.get("user", ""))
-        if settings.api_key:
-            provided = presented_key(request)
-            # Wrong keys are throttled per client, separately from failed logins.
-            throttle_key = "key:" + _client_key(request, settings.on_vercel)
-            wait = throttle.retry_after(throttle_key)
-            if wait > 0:
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"Too many failed attempts. Try again in {int(wait) + 1}s.",
-                    headers={"Retry-After": str(int(wait) + 1)},
-                )
-            if provided:
-                if secrets.compare_digest(provided.encode(), settings.api_key.encode()):
-                    throttle.record_success(throttle_key)
-                    return "api"
-                throttle.record_failure(throttle_key)
+        if api_key_ok(request):
+            return "api"
         raise HTTPException(status_code=401, detail="Login or an API key is required.")
 
     admin = Depends(require_admin)
@@ -234,5 +247,28 @@ def create_app(
 
     app.include_router(research_router(research), dependencies=[user])
 
+    # ----- MCP endpoint ------------------------------------------------------
+    # Mounted last so it only answers paths nothing else claimed. Only /mcp is served.
+    mcp_app = mcp.streamable_http_app()
+
+    async def mcp_guard(scope, receive, send):
+        if scope["type"] != "http":
+            return
+        if scope["path"] != "/mcp":
+            response = JSONResponse({"detail": "Not found."}, status_code=404)
+        else:
+            request = StarletteRequest(scope, receive)
+            try:
+                allowed = api_key_ok(request)
+            except HTTPException as exc:
+                response = JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
+            else:
+                if allowed:
+                    await mcp_app(scope, receive, send)
+                    return
+                response = JSONResponse({"detail": "An API key is required for MCP."}, status_code=401)
+        await response(scope, receive, send)
+
+    app.mount("/", mcp_guard)
     app.state.gemini = service
     return app

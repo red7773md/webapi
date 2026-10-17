@@ -4,3 +4,4 @@ gemini-webapi==2.1.1
 httpx==0.28.1
 itsdangerous==2.2.0
 python-multipart==0.0.32
+mcp==1.30.0
