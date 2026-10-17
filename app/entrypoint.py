@@ -13,14 +13,21 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from .config import ConfigError, load_settings
-from .main import create_app
 
 
 def build_entrypoint(env: Mapping[str, str] | None = None) -> FastAPI:
     try:
+        # Imported here so a missing package gives a readable 503, not a crash with no message.
+        from .main import create_app
+
         settings = load_settings(env)
     except ConfigError as exc:
         return _not_configured_app(str(exc))
+    except ImportError as exc:
+        missing = exc.name or str(exc)
+        return _not_configured_app(
+            f"The server is missing the package {missing}. It must be listed in pyproject.toml and requirements.txt."
+        )
     return create_app(settings)
 
 
