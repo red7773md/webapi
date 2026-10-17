@@ -155,7 +155,7 @@
           body: { username: userInput.value, password: passInput.value },
         });
         passInput.value = "";
-        renderShell(result.username);
+        renderShell(result.username, true);
       } catch (err) {
         setStatus(err.message, "bad");
         passInput.value = "";
@@ -188,7 +188,7 @@
 
   // ----- shell ---------------------------------------------------------------
 
-  function renderShell(username) {
+  function renderShell(username, powerOn = false) {
     clearInterval(clockTimer);
 
     const clock = el("span", { class: "clock" });
@@ -208,7 +208,6 @@
         "div",
         { class: "head-row" },
         el("span", { class: "brand", text: "GEMINI//ARCHIVE" }),
-        el("span", { class: "rec", text: "● REC" }),
         clock,
       ),
       el("div", { class: "head-row dim", text: `operator: ${username}  ·  node: ${location.host}` }),
@@ -217,6 +216,11 @@
 
     const view = el("main", { id: "view", class: "frame", tabindex: -1 });
     $app.replaceChildren(header, view);
+    if (powerOn) {
+      // One power-on flicker after a successful login. The class is removed when it has played.
+      $app.classList.add("power-on");
+      setTimeout(() => $app.classList.remove("power-on"), 1200);
+    }
     route();
   }
 

@@ -53,9 +53,49 @@ body {
 }
 
 @keyframes flicker {
-  0%, 92%, 100% { opacity: 1; }
-  93% { opacity: 0.93; }
-  95% { opacity: 0.98; }
+  0%, 90%, 100% { opacity: 1; }
+  91% { opacity: 0.86; }
+  92% { opacity: 1; }
+  94% { opacity: 0.92; }
+  95% { opacity: 1; }
+}
+
+/* A slow light band rolls down the screen, as on an old monitor. It is not a recording light. */
+.crt::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -160px;
+  height: 160px;
+  background: linear-gradient(to bottom, rgba(141, 255, 155, 0), rgba(141, 255, 155, 0.05) 50%, rgba(141, 255, 155, 0));
+  animation: roll 9s linear infinite;
+}
+
+@keyframes roll {
+  from { transform: translateY(0); }
+  to { transform: translateY(calc(100vh + 160px)); }
+}
+
+/* Power-on flicker, played once after a successful login. */
+.term.power-on {
+  animation: power-on 1.1s steps(1, end) both;
+}
+
+@keyframes power-on {
+  0% { opacity: 0; filter: brightness(2.2); }
+  8% { opacity: 1; }
+  12% { opacity: 0.15; }
+  18% { opacity: 0.9; }
+  24% { opacity: 0.05; }
+  32% { opacity: 1; filter: brightness(1.5); }
+  46% { opacity: 0.55; }
+  60% { opacity: 1; filter: brightness(1); }
+  100% { opacity: 1; filter: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crt, .crt::after, .term.power-on { animation: none; }
 }
 
 /* ----- layout ------------------------------------------------------------ */
