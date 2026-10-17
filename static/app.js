@@ -299,6 +299,12 @@
       statusBox.replaceChildren(
         ...rows.flatMap(([k, v, cls]) => [el("div", { class: "k", text: k }), el("div", { class: `v ${cls}`, text: v })]),
       );
+      // The import box is for a first save, a replacement after a failed check, or a fresh start after purge.
+      // A saved cookie that verified hides it, so the box never sits beside a working login.
+      const working = Boolean(st.configured && st.verified);
+      importArea.hidden = working;
+      importTitle.textContent = st.configured ? "replace the saved cookies" : "import cookies from browser";
+      purgeBtn.hidden = !st.configured;
     };
 
     const failWith = (err) => {
@@ -366,12 +372,12 @@
     const purgeBtn = el("button", { class: "btn danger", type: "button", onclick: purge, text: "[ PURGE COOKIES ]" });
     buttons.push(verifyBtn, saveBtn, purgeBtn);
 
-    view.replaceChildren(
-      panelTitle("session // gemini uplink"),
-      statusBox,
-      el("div", { class: "actions" }, verifyBtn, purgeBtn),
+    const importTitle = panelTitle("import cookies from browser");
+    const importArea = el(
+      "div",
+      null,
       el("hr", { class: "dim" }),
-      panelTitle("import cookies from browser"),
+      importTitle,
       el(
         "p",
         { class: "hint" },
@@ -390,6 +396,13 @@
       ),
       textarea,
       el("div", { class: "actions" }, saveBtn),
+    );
+
+    view.replaceChildren(
+      panelTitle("session // gemini uplink"),
+      statusBox,
+      el("div", { class: "actions" }, verifyBtn, purgeBtn),
+      importArea,
       logBox,
     );
 
