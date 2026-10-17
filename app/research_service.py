@@ -127,7 +127,7 @@ class ResearchService:
         await self._records.delete(record_name(job_id))
         await self._records.remove_from_index(RESEARCH_INDEX, job_id)
 
-    async def create(self, prompt: str, model: str | None) -> dict[str, Any]:
+    async def create(self, prompt: str, model: str | None, stream_seconds: float | None = None) -> dict[str, Any]:
         prompt = prompt.strip()
         if not prompt:
             raise FeatureError(422, "Research topic is empty.")
@@ -139,11 +139,12 @@ class ResearchService:
         # The chat is created here, not inside the library, so its id is known even when
         # the stream is cut. Gemini finishes the planning turn on its side either way.
         chat = client.start_chat(model=model or None)
+        budget = PLAN_STREAM_SECONDS if stream_seconds is None else stream_seconds
         try:
             with _logged_stream(client):
                 plan = await asyncio.wait_for(
                     client.create_deep_research_plan(prompt, chat=chat),
-                    PLAN_STREAM_SECONDS,
+                    budget,
                 )
         except Exception as exc:
             if not _can_wait_for_saved_chat(exc, chat):
@@ -191,7 +192,7 @@ class ResearchService:
         await self._save(job)
         return job
 
-    async def start(self, job_id: str) -> dict[str, Any]:
+    async def start(self, job_id: str, timeout: float | None = None) -> dict[str, Any]:
         job = await self.get_job(job_id)
         status = job["status"]
         if status == "planning":
@@ -221,7 +222,7 @@ class ResearchService:
             with _logged_stream(client):
                 await asyncio.wait_for(
                     client.start_deep_research(plan, chat=chat),
-                    START_TIMEOUT_SECONDS,
+                    START_TIMEOUT_SECONDS if timeout is None else timeout,
                 )
         except Exception as exc:
             log.warning("research start failed after %.0f s: %s", time.monotonic() - started, exc)

@@ -49,7 +49,17 @@ def test_mcp_starts_and_lists_the_gemini_tools(client):
     assert init.status_code == 200
     assert init.json()["result"]["serverInfo"]["name"] == "gemini-archive"
     tools = rpc(client, "tools/list", {}, req_id=2).json()["result"]["tools"]
-    assert {tool["name"] for tool in tools} == {"gemini_send", "gemini_get_chat", "gemini_list_chats", "gemini_delete_chat"}
+    assert {tool["name"] for tool in tools} == {
+        "gemini_send",
+        "gemini_get_chat",
+        "gemini_list_chats",
+        "gemini_delete_chat",
+        "gemini_ask",
+        "gemini_analyze_image",
+        "gemini_generate_image",
+        "gemini_start_deep_research",
+        "gemini_research_status",
+    }
 
 
 def test_mcp_send_returns_the_reply_as_a_tool_result(client):

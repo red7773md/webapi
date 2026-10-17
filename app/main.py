@@ -22,6 +22,7 @@ from .config import BASE_DIR, Settings, load_settings
 from .cookie_store import CookieStore, parse_cookie_text
 from .chat_service import ChatService
 from .feature_routes import chat_router, image_router, research_router
+from .ask_service import AskService
 from .image_service import ImageService
 from .research_service import ResearchService
 from .gemini_service import GeminiService
@@ -82,7 +83,8 @@ def create_app(
     research = ResearchService(service, records)
     throttle = LoginThrottle()
 
-    mcp = build_mcp(chats)
+    ask = AskService(service)
+    mcp = build_mcp(chats, images, research, ask)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):

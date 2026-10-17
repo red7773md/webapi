@@ -75,6 +75,17 @@ POST /api/research/<id>/start
 
 Gemini is connected through the browser (cookies on the Session screen). Calls fail with 409 "not connected" until that is done. Wrong keys are throttled like failed logins.
 
+## MCP tools (`/mcp`)
+
+The same key works as the MCP endpoint's bearer token. Tools:
+
+- Chats: `gemini_send`, `gemini_get_chat`, `gemini_list_chats`, `gemini_delete_chat`.
+- One-off questions (not saved to the archive): `gemini_ask(prompt)` returns the text reply; `gemini_analyze_image(prompt, image_base64)` answers about a PNG, JPEG, WEBP or GIF.
+- Pictures: `gemini_generate_image(prompt)` returns the image and keeps a copy in the image archive.
+- Deep research: `gemini_start_deep_research(prompt)` returns a `research_id` and status `planned`. Then call `gemini_research_status(research_id)` until the status is `done` (with `report` and `sources`) or `failed`. The first status call after the plan starts the research; the report takes about 5 to 10 minutes.
+
+Each call finishes well inside the 120 s that calling apps usually allow. Gemini waits are capped (see the constants in `app/mcp_tools.py`, `app/ask_service.py`).
+
 ## Security notes
 
 - Cookies and the verification result are stored together in one record: in Blob
