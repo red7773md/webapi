@@ -72,3 +72,11 @@ def test_mcp_list_and_delete_work_on_a_saved_chat(client):
     assert deleted["structuredContent"] == {"ok": True}
     missing = rpc(client, "tools/call", {"name": "gemini_get_chat", "arguments": {"chat_id": chat_id}}, req_id=6).json()["result"]
     assert missing["isError"] is True
+
+
+def test_the_admin_page_gets_the_mcp_path_and_key_only_after_a_login(client):
+    client.cookies.clear()
+    assert client.get("/api/mcp").status_code == 401
+    assert client.post("/api/auth/login", json={"username": ADMIN_USER, "password": ADMIN_PASS}).status_code == 200
+    info = client.get("/api/mcp").json()
+    assert info == {"path": "/mcp", "key": KEY}

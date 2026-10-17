@@ -376,6 +376,54 @@
     const purgeBtn = el("button", { class: "btn danger", type: "button", onclick: purge, text: "[ PURGE COOKIES ]" });
     buttons.push(verifyBtn, saveBtn, purgeBtn);
 
+    // The MCP address for an AI app: the path plus the key as ?key=, which the server accepts.
+    const mcpNote = el("p", { class: "hint", text: "loading the MCP address..." });
+    const mcpInput = el("input", {
+      class: "field",
+      id: "mcp-url",
+      readonly: true,
+      spellcheck: false,
+      autocomplete: "off",
+      "aria-label": "MCP URL with key",
+    });
+    const mcpCopyBtn = el("button", {
+      class: "btn",
+      type: "button",
+      disabled: true,
+      text: "[ COPY MCP URL ]",
+      onclick: async () => {
+        mcpInput.select();
+        try {
+          await navigator.clipboard.writeText(mcpInput.value);
+          log("MCP URL copied.", "ok");
+        } catch (_) {
+          log("could not reach the clipboard. the URL is selected: press Ctrl+C.", "warn");
+        }
+      },
+    });
+    const mcpArea = el(
+      "div",
+      null,
+      el("hr", { class: "dim" }),
+      panelTitle("mcp // paste into an ai app"),
+      mcpNote,
+      mcpInput,
+      el("div", { class: "actions" }, mcpCopyBtn),
+    );
+    const drawMcp = (info) => {
+      if (!info.key) {
+        mcpNote.textContent =
+          "No API key is set on the server. Add APP_API_KEY (24+ characters) to the environment variables and redeploy.";
+        mcpInput.value = "";
+        mcpCopyBtn.disabled = true;
+        return;
+      }
+      mcpInput.value = `${location.origin}${info.path}?key=${info.key}`;
+      mcpNote.textContent =
+        "Copy this into an AI app that accepts an MCP server URL. The key is part of the URL, so keep this page private.";
+      mcpCopyBtn.disabled = false;
+    };
+
     const importTitle = panelTitle("import cookies from browser");
     const importArea = el(
       "div",
@@ -406,11 +454,13 @@
       panelTitle("session // gemini uplink"),
       statusBox,
       el("div", { class: "actions" }, verifyBtn, purgeBtn),
+      mcpArea,
       importArea,
       logBox,
     );
 
     // Load current state.
+    api("/api/mcp").then(drawMcp).catch(failWith);
     busy(true);
     api("/api/session")
       .then((st) => {

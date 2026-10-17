@@ -225,6 +225,11 @@ def create_app(
     async def clear_cookies() -> dict[str, Any]:
         return await service.clear_cookies()
 
+    @app.get("/api/mcp", dependencies=[admin])
+    async def mcp_address() -> dict[str, Any]:
+        """The MCP path and the app's API key, so the page can show a URL to paste into an AI app."""
+        return {"path": "/mcp", "key": settings.api_key}
+
     @app.post("/api/session/verify", dependencies=[admin])
     async def verify_cookies() -> dict[str, Any]:
         return await service.verify()
