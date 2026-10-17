@@ -10,6 +10,8 @@ Required on Vercel (Vercel sets VERCEL=1 at runtime):
 Optional:
     COOKIE_SECURE             "1" to force HTTPS-only session cookies (default "1" on Vercel)
     GEMINI_WEBUI_DATA         local folder for cookies and the generated secret (default ./data)
+    APP_API_KEY               lets scripts call the chat, image and research routes without a login.
+                              It is this app's own key, not a Gemini key. At least 24 characters.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ class Settings:
     data_dir: Path
     blob_token: str | None = None
     on_vercel: bool = False
+    api_key: str | None = None
 
     @property
     def storage_label(self) -> str:
@@ -66,6 +69,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     password = env.get("ADMIN_PASSWORD", "")
     secret_key = env.get("APP_SECRET_KEY", "").strip()
     blob_token = env.get("BLOB_READ_WRITE_TOKEN", "").strip() or None
+    api_key = env.get("APP_API_KEY", "").strip() or None
 
     missing: list[str] = []
     if not username:
@@ -78,6 +82,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         missing.append("BLOB_READ_WRITE_TOKEN (connect a private Blob store to this project)")
     if missing:
         raise ConfigError("Missing configuration: " + ", ".join(missing))
+    if api_key is not None and len(api_key) < 24:
+        raise ConfigError("APP_API_KEY must be at least 24 characters.")
 
     default_dir = VERCEL_SCRATCH if on_vercel else BASE_DIR / "data"
     data_dir = Path(env.get("GEMINI_WEBUI_DATA") or default_dir)
@@ -93,4 +99,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         data_dir=data_dir,
         blob_token=blob_token,
         on_vercel=on_vercel,
+        api_key=api_key,
     )

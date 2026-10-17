@@ -7,6 +7,7 @@ Vercel: index.py exposes `app`, built by app.entrypoint.build_entrypoint().
 
 from __future__ import annotations
 
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any, Callable
 
@@ -116,7 +117,37 @@ def create_app(
             raise HTTPException(status_code=401, detail="Login required.")
         return str(request.session.get("user", ""))
 
+    def presented_key(request: Request) -> str:
+        """The key a caller sent: Bearer header, X-API-Key header, or a ?key= at the end of the URL."""
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return request.headers.get("x-api-key", "").strip() or request.query_params.get("key", "").strip()
+
+    def require_user(request: Request) -> str:
+        """Feature routes accept a browser login or the app's API key. Cookie routes stay login-only."""
+        if request.session.get("admin"):
+            return str(request.session.get("user", ""))
+        if settings.api_key:
+            provided = presented_key(request)
+            # Wrong keys are throttled per client, separately from failed logins.
+            throttle_key = "key:" + _client_key(request, settings.on_vercel)
+            wait = throttle.retry_after(throttle_key)
+            if wait > 0:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Too many failed attempts. Try again in {int(wait) + 1}s.",
+                    headers={"Retry-After": str(int(wait) + 1)},
+                )
+            if provided:
+                if secrets.compare_digest(provided.encode(), settings.api_key.encode()):
+                    throttle.record_success(throttle_key)
+                    return "api"
+                throttle.record_failure(throttle_key)
+        raise HTTPException(status_code=401, detail="Login or an API key is required.")
+
     admin = Depends(require_admin)
+    user = Depends(require_user)
 
     # ----- public ------------------------------------------------------------
 
@@ -193,15 +224,15 @@ def create_app(
 
     # ----- chat (multi-turn, attachments, history) --------------------------
 
-    app.include_router(chat_router(chats), dependencies=[admin])
+    app.include_router(chat_router(chats), dependencies=[user])
 
     # ----- image generation -------------------------------------------------
 
-    app.include_router(image_router(images), dependencies=[admin])
+    app.include_router(image_router(images), dependencies=[user])
 
     # ----- deep research (plan, start, short polls) -------------------------
 
-    app.include_router(research_router(research), dependencies=[admin])
+    app.include_router(research_router(research), dependencies=[user])
 
     app.state.gemini = service
     return app

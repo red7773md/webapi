@@ -36,7 +36,7 @@ Risk accepted by Emdad: unofficial endpoints can break, and the account used
 | 1 | Admin login, cookie import, verify uplink, terminal UI, Vercel-ready storage | **done and live** (2026-10-13): private Blob store, cookies saved, uplink verified on the deployed site, 3 models listed. 42 tests pass |
 | 2 | Chat module (multi-turn, file attachments, history, replies fetched by chat id) | built and tested: local tests, browser smoke test (waiting, reload, reopen, reply). Live check pending deploy |
 | 3 | Image generation module | built and tested: local tests, browser smoke test. Live check pending deploy |
-| 4 | Deep research module (plan, confirm, short polls, report view) | built and tested: 107 local tests in total, browser smoke test (plan, start, poll to report, source link, delete). Plan recovery from the saved chat added; live check pending deploy |
+| 4 | Deep research module (plan, confirm, short polls, report view) | built and tested: 119 local tests in total, browser smoke test (plan, start, poll to report, source link, delete). Plan recovery from the saved chat added; live check pending deploy |
 | — | ChatGPT client (unofficial, cookie-based) | not started |
 
 Step 1 commits: `6ca6eb4` (app), `7e18c36` (Vercel-ready storage), `48c6040`
@@ -176,6 +176,11 @@ set -a; . ./.env; set +a
   The chat page polls every 20 s while waiting and resumes when the chat is reopened.
   Not verified live: whether Gemini finishes a chat reply after the send was cut off. The
   deep research plan does, so the same is expected here. Check the first live slow reply.
+- API key (`APP_API_KEY`, optional, 24+ chars). Chat, image and research routes accept it as
+  `Authorization: Bearer`, `X-API-Key`, or `?key=`. It is this app's own key, not a Gemini key.
+  Cookie and session routes stay login-only, so a key cannot change the Gemini cookies.
+  Wrong keys are throttled per client, like failed logins (5 wrong, then 5 minutes locked).
+  The key must be added to Vercel's environment variables by hand; it is not in the repo.
 - Request limits (to avoid being flagged for flooding). Gemini publishes no consumer
   rate limit that we could find, so the server keeps its own count low. Per job: one
   plan check per 20 s (about 75 over 25 minutes), one report check per 60 s. Requests

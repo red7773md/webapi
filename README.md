@@ -60,6 +60,21 @@ a Vercel Blob store instead.
 Accepted formats: a cookie header string, a JSON object, a cookie-extension JSON
 export, or the bare PSID value (optionally followed by a space and the PSIDTS value).
 
+## API for scripts
+
+Set `APP_API_KEY` (at least 24 characters) in the environment, or in Vercel's project settings. This is this app's key, not a Gemini key. Send it on each call as `Authorization: Bearer <key>`, as an `X-API-Key` header, or as `?key=<key>` at the end of the URL. The chat, image and research routes accept it. The Gemini cookie and admin routes need the browser login.
+
+```text
+POST /api/chat/send          {"message": "..."}                  -> 200 answered, or 202 waiting with the chat id
+POST /api/chat/send          {"chat_id": "<id>", "message": "..."} -> a follow-up in the same chat
+GET  /api/chat/<id>          -> status answered | waiting | failed, and the messages
+POST /api/research           {"prompt": "..."}                   -> job id, planning
+GET  /api/research/<id>      -> status and the plan or report
+POST /api/research/<id>/start
+```
+
+Gemini is connected through the browser (cookies on the Session screen). Calls fail with 409 "not connected" until that is done. Wrong keys are throttled like failed logins.
+
 ## Security notes
 
 - Cookies and the verification result are stored together in one record: in Blob
