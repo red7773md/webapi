@@ -59,7 +59,19 @@ def test_mcp_starts_and_lists_the_gemini_tools(client):
         "gemini_generate_image",
         "gemini_start_deep_research",
         "gemini_research_status",
+        "gemini_list_models",
     }
+
+
+def test_mcp_lists_the_account_models_from_the_last_check(client):
+    rpc(client, "initialize", INIT)
+    resp = rpc(client, "tools/call", {"name": "gemini_list_models", "arguments": {}}, req_id=4).json()
+    result = resp["result"]
+    assert result.get("isError") in (False, None)
+    data = result.get("structuredContent") or {}
+    assert data["verified"] is True
+    assert [m["name"] for m in data["models"]] == ["gemini-flash"]
+    assert data["models"][0]["available"] is True
 
 
 def test_mcp_send_returns_the_reply_as_a_tool_result(client):

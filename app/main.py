@@ -84,7 +84,7 @@ def create_app(
     throttle = LoginThrottle()
 
     ask = AskService(service)
-    mcp = build_mcp(chats, images, research, ask)
+    mcp = build_mcp(chats, images, research, ask, service)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):

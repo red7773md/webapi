@@ -71,6 +71,7 @@ def build_mcp(
     images: ImageService,
     research: ResearchService,
     ask: AskService,
+    session: Any | None = None,  # the GeminiService: reads the model list saved by the last cookie check
 ) -> FastMCP:
     mcp = FastMCP(
         "gemini-archive",
@@ -90,6 +91,24 @@ def build_mcp(
         # (for example a Vercel domain) would otherwise be refused.
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
+
+    @mcp.tool()
+    async def gemini_list_models() -> dict[str, Any]:
+        """The Gemini models this account can use. Pass one of these names as the model argument of the other tools.
+        The list comes from the last successful cookie check. An empty list means the cookies have not been checked yet."""
+        if session is None:
+            return {"models": [], "verified": False, "verified_at": None}
+        state = await session.status()
+        models = [
+            {
+                "name": m["name"],
+                "display_name": m.get("display_name", ""),
+                "available": bool(m.get("available", True)),
+            }
+            for m in state.get("models") or []
+            if m.get("name")
+        ]
+        return {"models": models, "verified": bool(state.get("verified")), "verified_at": state.get("verified_at")}
 
     @mcp.tool()
     async def gemini_send(message: str, chat_id: str | None = None, model: str | None = None) -> dict[str, Any]:
