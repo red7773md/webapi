@@ -15,7 +15,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.transport_security import TransportSecuritySettings
 
-from .ask_service import AskService, decode_image
+from .ask_service import AskService, decode_document, decode_image
 from .chat_service import ChatService
 from .image_service import ImageService
 from .records import ID_PATTERN, FeatureError
@@ -113,14 +113,22 @@ def build_mcp(
         return {"ok": True}
 
     @mcp.tool()
-    async def gemini_ask(prompt: str, model: str | None = None) -> str:
-        """Ask Gemini one question and get its text reply. No chat is saved to the archive."""
-        return await ask.ask(prompt, model=model)
+    async def gemini_ask(
+        prompt: str,
+        model: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Ask Gemini one question and get its text reply. No chat is saved to the archive.
+        attachments is optional: up to 3 text files, each {"name": "report.md", "content_base64": "..."}
+        (.md, .txt, .csv or .json, 4 MB at most). Gemini reads them together with the prompt, so use them for long
+        text such as a report instead of pasting it into prompt."""
+        documents = [decode_document(item) for item in attachments or []]
+        return await ask.ask(prompt, model=model, documents=documents)
 
     @mcp.tool()
-    async def gemini_analyze_image(prompt: str, image_base64: str) -> str:
+    async def gemini_analyze_image(prompt: str, image_base64: str, model: str | None = None) -> str:
         """Ask Gemini about a picture. image_base64 is the picture as base64 (PNG, JPEG, WEBP or GIF). Returns the text reply."""
-        return await ask.ask(prompt, image=decode_image(image_base64))
+        return await ask.ask(prompt, model=model, image=decode_image(image_base64))
 
     @mcp.tool()
     async def gemini_generate_image(prompt: str, model: str | None = None) -> Image:

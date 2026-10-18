@@ -80,7 +80,7 @@ Gemini is connected through the browser (cookies on the Session screen). Calls f
 The same key works as the MCP endpoint's bearer token. Tools:
 
 - Chats: `gemini_send`, `gemini_get_chat`, `gemini_list_chats`, `gemini_delete_chat`.
-- One-off questions (not saved to the archive): `gemini_ask(prompt)` returns the text reply; `gemini_analyze_image(prompt, image_base64)` answers about a PNG, JPEG, WEBP or GIF.
+- One-off questions (not saved to the archive): `gemini_ask(prompt, model?, attachments?)` returns the text reply. `attachments` is up to 3 text files, each `{"name": "report.md", "content_base64": "..."}` (.md, .txt, .csv or .json, 4 MB at most), read together with the prompt. Use it for long text such as a report. `gemini_analyze_image(prompt, image_base64, model?)` answers about a PNG, JPEG, WEBP or GIF. `model` is optional; leave it out for the account default.
 - Pictures: `gemini_generate_image(prompt)` returns the image and keeps a copy in the image archive.
 - Deep research: `gemini_start_deep_research(prompt)` returns a `research_id` and status `planned`. Then call `gemini_research_status(research_id)` until the status is `done` (with `report` and `sources`) or `failed`. The first status call after the plan starts the research; the report takes about 5 to 10 minutes.
 

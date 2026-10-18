@@ -46,6 +46,7 @@ class Backend:
         self.text = "Here is the answer."
         self.images: list[bytes] = [PNG]
         self.calls: list[dict] = []  # each Gemini request: its prompt and the files sent with it
+        self.models: list[str | None] = []  # the model each Gemini request asked for
         self.plan_error: Exception | None = None
         self.stream_cid = ""
         self.start_error: Exception | None = None
@@ -97,6 +98,7 @@ class FakeClient:
     async def generate_content(self, prompt, files=None, model=None, **_):
         sent = [(Path(f).suffix, Path(f).read_bytes()) for f in files or []]
         self._backend.calls.append({"prompt": prompt, "files": sent})
+        self._backend.models.append(model)
         return FakeOutput(self._backend.text, [FakeImage(data) for data in self._backend.images])
 
     async def create_deep_research_plan(self, prompt, chat=None, model=None):
@@ -216,6 +218,48 @@ def test_analyze_image_sends_the_picture_with_its_real_type(env):
     assert result["isError"] is False
     assert backend.calls[-1]["files"] == [(".png", PNG)]
     assert text_of(result) == backend.text
+
+
+def test_ask_sends_attached_documents_under_their_names(env):
+    client, backend = env
+    report = "# Report\n\nFacts about coffee."
+    result = call(
+        client,
+        "gemini_ask",
+        {
+            "prompt": "Analyse the attached report.",
+            "attachments": [{"name": "research-report.md", "content_base64": base64.b64encode(report.encode()).decode()}],
+        },
+    )
+    assert result["isError"] is False
+    assert backend.calls[-1] == {"prompt": "Analyse the attached report.", "files": [(".md", report.encode())]}
+
+
+def test_attachments_are_checked_before_gemini_is_called(env):
+    client, backend = env
+    good = base64.b64encode(b"text").decode()
+    bad = [
+        {"name": "../secret.md", "content_base64": good},
+        {"name": "picture.exe", "content_base64": good},
+        {"name": "", "content_base64": good},
+        {"name": "notes.md", "content_base64": "not base64!"},
+        {"name": "notes.md", "content_base64": ""},
+    ]
+    for item in bad:
+        assert call(client, "gemini_ask", {"prompt": "x", "attachments": [item]})["isError"] is True, item
+    too_many = [{"name": f"doc{i}.md", "content_base64": good} for i in range(4)]
+    assert call(client, "gemini_ask", {"prompt": "x", "attachments": too_many})["isError"] is True
+    same_name = [{"name": "a.md", "content_base64": good}, {"name": "a.md", "content_base64": good}]
+    assert call(client, "gemini_ask", {"prompt": "x", "attachments": same_name})["isError"] is True
+    assert backend.calls == []
+
+
+def test_the_model_reaches_gemini_for_questions_and_picture_checks(env):
+    client, backend = env
+    call(client, "gemini_ask", {"prompt": "a", "model": "gemini-flash"})
+    call(client, "gemini_analyze_image", {"prompt": "b", "image_base64": base64.b64encode(PNG).decode(), "model": "gemini-pro"})
+    call(client, "gemini_ask", {"prompt": "c"})
+    assert backend.models == ["gemini-flash", "gemini-pro", None]
 
 
 def test_analyze_image_refuses_what_is_not_a_picture_before_calling_gemini(env):
