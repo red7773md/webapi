@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
@@ -20,6 +20,7 @@ from starlette.requests import Request as StarletteRequest
 
 from .config import BASE_DIR, Settings, load_settings
 from .cookie_store import CookieStore, parse_cookie_text
+from .extension_pack import EXTENSION_FILENAME, build_configured_zip
 from .chat_service import ChatService
 from .feature_routes import chat_router, image_router, research_router
 from .ask_service import AskService
@@ -56,6 +57,13 @@ class LoginIn(BaseModel):
 
 class CookieIn(BaseModel):
     cookies: str = Field(max_length=20_000)
+
+
+def own_origin(request: Request) -> str:
+    """This server's address as the browser sees it. Behind Vercel's proxy the forwarded headers say it."""
+    scheme = request.headers.get("x-forwarded-proto", "").split(",")[0].strip() or request.url.scheme
+    host = request.headers.get("x-forwarded-host", "").split(",")[0].strip() or request.headers.get("host", "")
+    return f"{scheme}://{host}"
 
 
 def _client_key(request: Request, behind_proxy: bool) -> str:
@@ -256,6 +264,28 @@ def create_app(
     @app.post("/api/session/verify", dependencies=[admin])
     async def verify_cookies() -> dict[str, Any]:
         return await service.verify()
+
+    # ----- browser extension (configured download, admin only) ----------------
+
+    @app.get("/api/extension/info", dependencies=[admin])
+    async def extension_info() -> dict[str, Any]:
+        """Whether the configured download can be built. The sync key is never sent back."""
+        return {"ready": bool(settings.sync_key), "filename": EXTENSION_FILENAME}
+
+    @app.get("/api/extension/download", dependencies=[admin])
+    async def extension_download(request: Request) -> Any:
+        """A zip of the extension with this server's address and the sync key already filled in."""
+        if not settings.sync_key:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Set GEMINI_SYNC_KEY on the server, then redeploy, before downloading."},
+            )
+        data = build_configured_zip(own_origin(request), settings.sync_key)
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{EXTENSION_FILENAME}"'},
+        )
 
     @app.exception_handler(StorageError)
     async def storage_unavailable(_: Request, exc: StorageError) -> JSONResponse:

@@ -8,3 +8,4 @@ data
 tests
 pytest.ini
 requirements-dev.txt
+extension

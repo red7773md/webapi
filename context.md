@@ -67,6 +67,10 @@ app/
                           polls of the chat until the report is ready; jobs in research/
   gemini_plan.py          reads a plan back from the saved chat when the live stream lost it
   feature_routes.py       routers for /api/chat, /api/image and /api/research (admin only)
+  extension_pack.py       build_configured_zip(): the extension zip + defaults.json (server address, sync key)
+  extension_files.py      GENERATED: the extension's files, base64. Rebuild with
+                          `python extension/build_extension.py` after any change in extension/
+extension/                Gemini browser extension source (no keys). Not deployed (.vercelignore)
 static/                   index.html, style.css, app.js (no build step, textContent only)
 tests/test_step1.py       37 tests; fake Gemini client and in-memory Blob HTTP
 tests/test_storage_errors.py  5 tests; Blob refusals and network failures
@@ -76,6 +80,10 @@ tests/test_research.py  25 tests; plan, start, polling, failed start, retry, 90-
                           plan recovered from the saved chat, saved chat without a plan,
                           check gaps and back-off
 tests/test_gemini_plan.py  7 tests; saved turns parsed, plan found, RPC payload, log line
+tests/test_session_sync.py  6 tests; the sync route, its key, its 503/401 answers
+tests/test_extension_download.py  7 tests; admin-only download, configured zip, embedded files
+                          match extension/ (fails when the build was not re-run)
+tests/test_extension_gemini.py  22 tests; background.js (Node) and the floating panel (Chromium)
 ```
 
 Key decisions:
@@ -97,6 +105,10 @@ Key decisions:
 - **Storage failures return a readable message.** Status shows it in the ERROR row;
   save and clear return 503 with the same text.
 - Admin login uses a signed session cookie (SameSite=strict, HTTPS-only on Vercel).
+- **The extension download is admin-only.** `GET /api/extension/info` says whether it can be built
+  (never shows the key); `GET /api/extension/download` returns a zip whose `defaults.json` holds this
+  server's address (from the forwarded headers) and `GEMINI_SYNC_KEY`. 503 when the key is unset.
+  The app key and the sync key cannot open either route.
 - No API docs endpoints (`/docs`, `/openapi.json`) are exposed.
 
 ## Environment variables
