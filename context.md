@@ -109,6 +109,7 @@ Key decisions:
 | `BLOB_READ_WRITE_TOKEN` | Vercel (added by connecting Blob) | Required on Vercel. Must belong to a **private** store. Local: optional, uses Blob if set |
 | `COOKIE_SECURE` | optional | `1` forces HTTPS-only cookies (default `1` on Vercel) |
 | `GEMINI_WEBUI_DATA` | optional, local | Folder for local cookies and secret (default `./data`) |
+| `GEMINI_SYNC_KEY` | optional, for the browser extension | At least 24 characters, different from `APP_API_KEY`. Opens only `POST /api/session/sync`, which saves the Gemini cookies. Without it that route answers 503 |
 | `VERCEL` | set by Vercel | `1` enables Vercel mode |
 
 ## Deployment (Vercel)

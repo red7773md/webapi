@@ -131,13 +131,13 @@ def create_app(
             return auth[7:].strip()
         return request.headers.get("x-api-key", "").strip() or request.query_params.get("key", "").strip()
 
-    def api_key_ok(request: Request) -> bool:
-        """True when the request carries the app's API key. Wrong keys are throttled per client,
-        separately from failed logins. Raises 429 while that client is locked out."""
-        if not settings.api_key:
+    def key_ok(request: Request, expected: str | None, throttle_name: str) -> bool:
+        """True when the request carries `expected`. Wrong keys are throttled per client, under
+        `throttle_name` and separately from failed logins. Raises 429 while that client is locked out."""
+        if not expected:
             return False
         provided = presented_key(request)
-        throttle_key = "key:" + _client_key(request, settings.on_vercel)
+        throttle_key = f"{throttle_name}:" + _client_key(request, settings.on_vercel)
         wait = throttle.retry_after(throttle_key)
         if wait > 0:
             raise HTTPException(
@@ -147,11 +147,19 @@ def create_app(
             )
         if not provided:
             return False
-        if secrets.compare_digest(provided.encode(), settings.api_key.encode()):
+        if secrets.compare_digest(provided.encode(), expected.encode()):
             throttle.record_success(throttle_key)
             return True
         throttle.record_failure(throttle_key)
         return False
+
+    def api_key_ok(request: Request) -> bool:
+        """True when the request carries the app's API key."""
+        return key_ok(request, settings.api_key, "key")
+
+    def sync_key_ok(request: Request) -> bool:
+        """True when the request carries the browser extension's sync key. Nothing else opens it."""
+        return key_ok(request, settings.sync_key, "sync")
 
     def require_user(request: Request) -> str:
         """Feature routes accept a browser login or the app's API key. Cookie routes stay login-only."""
@@ -217,6 +225,19 @@ def create_app(
 
     @app.post("/api/session/cookies", dependencies=[admin])
     async def save_cookies(body: CookieIn) -> Any:
+        try:
+            psid, psidts = parse_cookie_text(body.cookies)
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        return await service.save_cookies(psid, psidts)
+
+    @app.post("/api/session/sync")
+    async def sync_cookies_from_extension(body: CookieIn, request: Request) -> Any:
+        """The browser extension saves the Gemini cookies here, with its own sync key. The app key and a login do not open it."""
+        if not settings.sync_key:
+            return JSONResponse(status_code=503, content={"detail": "GEMINI_SYNC_KEY is not set on the server."})
+        if not sync_key_ok(request):
+            raise HTTPException(status_code=401, detail="The sync key is wrong or missing.")
         try:
             psid, psidts = parse_cookie_text(body.cookies)
         except ValueError as exc:

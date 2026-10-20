@@ -12,6 +12,8 @@ Optional:
     GEMINI_WEBUI_DATA         local folder for cookies and the generated secret (default ./data)
     APP_API_KEY               lets scripts call the chat, image and research routes without a login.
                               It is this app's own key, not a Gemini key. At least 24 characters.
+    GEMINI_SYNC_KEY           lets the browser extension save the Gemini cookies (that one route only).
+                              At least 24 characters. Set a different value from APP_API_KEY.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ class Settings:
     blob_token: str | None = None
     on_vercel: bool = False
     api_key: str | None = None
+    sync_key: str | None = None
 
     @property
     def storage_label(self) -> str:
@@ -70,6 +73,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     secret_key = env.get("APP_SECRET_KEY", "").strip()
     blob_token = env.get("BLOB_READ_WRITE_TOKEN", "").strip() or None
     api_key = env.get("APP_API_KEY", "").strip() or None
+    sync_key = env.get("GEMINI_SYNC_KEY", "").strip() or None
 
     missing: list[str] = []
     if not username:
@@ -84,6 +88,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         raise ConfigError("Missing configuration: " + ", ".join(missing))
     if api_key is not None and len(api_key) < 24:
         raise ConfigError("APP_API_KEY must be at least 24 characters.")
+    if sync_key is not None and len(sync_key) < 24:
+        raise ConfigError("GEMINI_SYNC_KEY must be at least 24 characters.")
 
     default_dir = VERCEL_SCRATCH if on_vercel else BASE_DIR / "data"
     data_dir = Path(env.get("GEMINI_WEBUI_DATA") or default_dir)
@@ -100,4 +106,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         blob_token=blob_token,
         on_vercel=on_vercel,
         api_key=api_key,
+        sync_key=sync_key,
     )
