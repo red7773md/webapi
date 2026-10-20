@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini Session Sync",
+  "version": "1.0.0",
+  "description": "Copies your Gemini login from this browser to your own Gemini Archive server when you open gemini.google.com.",
+  "permissions": ["cookies", "storage"],
+  "host_permissions": ["https://gemini.google.com/*", "https://*/*", "http://localhost/*"],
+  "background": { "scripts": ["background.js"] },
+  "content_scripts": [
+    { "matches": ["https://gemini.google.com/*"], "js": ["content.js"], "run_at": "document_idle" }
+  ],
+  "action": { "default_title": "Gemini Session Sync" },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "icons": { "128": "icon.png" },
+  "browser_specific_settings": { "gecko": { "id": "gemini-sync@local", "strict_min_version": "128.0" } }
+}

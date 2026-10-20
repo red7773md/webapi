@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gemini Session Sync</title>
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+<main>
+  <h1>GEMINI // SYNC</h1>
+  <p class="hint">These values are stored in this browser profile only. Anyone with access to this browser can read them.</p>
+
+  <label>Gemini Archive server URL
+    <input id="serverUrl" placeholder="https://webapi-your-project.vercel.app" autocomplete="off"></label>
+  <label>Sync key (GEMINI_SYNC_KEY on that server)
+    <input id="syncKey" type="password" autocomplete="off"></label>
+  <label>Sync at most once every
+    <select id="intervalMin">
+      <option value="30">30 minutes</option>
+      <option value="60">1 hour</option>
+      <option value="120">2 hours</option>
+    </select></label>
+
+  <div class="row">
+    <button id="save">SAVE</button>
+    <button id="test" class="alt">TEST SERVER</button>
+    <button id="sync" class="alt">SYNC NOW</button>
+  </div>
+  <pre id="out" aria-live="polite"></pre>
+  <p class="hint">Last sync: <span id="last">never</span></p>
+</main>
+<script src="options.js"></script>
+</body>
+</html>
