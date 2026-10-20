@@ -424,6 +424,59 @@
       mcpCopyBtn.disabled = false;
     };
 
+    // The browser extension, zipped with this server's address and the sync key already in it. Admin only.
+    // It is not in `buttons`: busy() would enable it again, and it stays off until the server has a sync key.
+    const extNote = el("p", { class: "hint", text: "checking the extension..." });
+    const downloadExtension = async () => {
+      extBtn.disabled = true;
+      log("building the extension download...");
+      try {
+        const res = await fetch("/api/extension/download", { credentials: "same-origin" });
+        if (!res.ok) {
+          let detail = `HTTP ${res.status}`;
+          try {
+            const j = await res.json();
+            if (typeof j.detail === "string") detail = j.detail;
+          } catch (_) {
+            /* keep the status text */
+          }
+          throw new ApiError(res.status, detail);
+        }
+        const url = URL.createObjectURL(await res.blob());
+        const link = el("a", { href: url, download: "gemini-session-sync.zip" });
+        document.body.append(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        log("extension downloaded. It contains your sync key: keep it private.", "ok");
+      } catch (err) {
+        failWith(err);
+      } finally {
+        extBtn.disabled = false;
+      }
+    };
+    const extBtn = el("button", {
+      class: "btn",
+      type: "button",
+      disabled: true,
+      text: "[ DOWNLOAD EXTENSION ]",
+      onclick: downloadExtension,
+    });
+    const extArea = el(
+      "div",
+      null,
+      el("hr", { class: "dim" }),
+      panelTitle("extension // sync gemini from your browser"),
+      extNote,
+      el("div", { class: "actions" }, extBtn),
+    );
+    const drawExtension = (info) => {
+      extBtn.disabled = !info.ready;
+      extNote.textContent = info.ready
+        ? "Chrome, Edge, Brave or Firefox. It already holds this server's address and the sync key, so there is nothing to type. Unzip it and follow the README inside."
+        : "Set GEMINI_SYNC_KEY on the server (24+ characters, different from APP_API_KEY), redeploy, then reload this page.";
+    };
+
     const importTitle = panelTitle("import cookies from browser");
     const importArea = el(
       "div",
@@ -455,12 +508,19 @@
       statusBox,
       el("div", { class: "actions" }, verifyBtn, purgeBtn),
       mcpArea,
+      extArea,
       importArea,
       logBox,
     );
 
     // Load current state.
     api("/api/mcp").then(drawMcp).catch(failWith);
+    api("/api/extension/info")
+      .then(drawExtension)
+      .catch((err) => {
+        extNote.textContent = err.message;
+        failWith(err);
+      });
     busy(true);
     api("/api/session")
       .then((st) => {

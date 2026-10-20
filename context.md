@@ -84,6 +84,7 @@ tests/test_session_sync.py  6 tests; the sync route, its key, its 503/401 answer
 tests/test_extension_download.py  7 tests; admin-only download, configured zip, embedded files
                           match extension/ (fails when the build was not re-run)
 tests/test_extension_gemini.py  22 tests; background.js (Node) and the floating panel (Chromium)
+tests/test_extension_card.py  2 tests; admin card in Chromium: download, configured with this server, off without the key
 ```
 
 Key decisions:
